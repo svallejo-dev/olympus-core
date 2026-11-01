@@ -4,12 +4,12 @@ Cliente HTTP para llamar a otras APIs con la resiliencia ya resuelta por configu
 reintentos con backoff exponencial y jitter, timeouts por intento y totales, circuit breaker
 por host, bulkhead, rate limiting y OpenTelemetry. Así cada proyecto deja de reimplementarlos.
 
-Es un SDK independiente del monorepo `olympus`: no importa `atlas` ni ningún otro módulo.
+Es un SDK independiente del monorepo `olympus-core`: no importa `atlas` ni ningún otro módulo.
 
 ## Instalación
 
 ```sh
-go get github.com/svallejo-dev/olympus/hermes@latest
+go get github.com/svallejo-dev/olympus-core/hermes@latest
 ```
 
 El repositorio es privado, así que Go necesita saltarse el proxy público y tener acceso por git:

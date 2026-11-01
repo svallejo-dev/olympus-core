@@ -16,7 +16,7 @@ No impone framework: todo lo que añade son middlewares estándar alrededor de t
 ## Instalación
 
 ```sh
-go get github.com/svallejo-dev/olympus/atlas@latest
+go get github.com/svallejo-dev/olympus-core/atlas@latest
 ```
 
 El repositorio es privado. Indica a Go que no use el proxy público y da acceso a git por SSH o
@@ -41,7 +41,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/svallejo-dev/olympus/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas"
 )
 
 func main() {
@@ -238,7 +238,7 @@ esperar, espéralas en un `WithShutdownHook`.
   que escribe en el logger.
 
 Las globales son el punto de encuentro con otros SDKs del mismo proceso. `hermes`, el cliente HTTP
-de olympus, usa por defecto `otel.GetMeterProvider()`, `otel.GetTracerProvider()` y el propagador
+de olympus-core, usa por defecto `otel.GetMeterProvider()`, `otel.GetTracerProvider()` y el propagador
 global; por eso, con atlas en el mismo binario, sus métricas de cliente salen en el mismo
 `/metrics` y sus spans cuelgan de la traza de la petición entrante, sin que ninguno de los dos
 módulos dependa del otro.

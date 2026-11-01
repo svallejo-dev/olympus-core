@@ -1,4 +1,4 @@
-module github.com/svallejo-dev/olympus/hermes
+module github.com/svallejo-dev/olympus-core/hermes
 
 go 1.26.0
 

@@ -49,7 +49,7 @@ jobs:
             echo "## Install"
             echo
             echo '```sh'
-            echo "go get github.com/svallejo-dev/olympus/$MODULE@$VERSION"
+            echo "go get github.com/svallejo-dev/olympus-core/$MODULE@$VERSION"
             echo '```'
             echo
             echo "## Changes"

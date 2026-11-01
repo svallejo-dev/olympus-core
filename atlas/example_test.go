@@ -13,7 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/svallejo-dev/olympus/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas"
 )
 
 func ExampleRun() {

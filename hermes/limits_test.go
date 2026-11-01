@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 func TestBulkheadLimitsConcurrency(t *testing.T) {

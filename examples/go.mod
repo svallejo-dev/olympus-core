@@ -1,10 +1,10 @@
-module github.com/svallejo-dev/olympus/examples
+module github.com/svallejo-dev/olympus-core/examples
 
 go 1.26.0
 
 require (
-	github.com/svallejo-dev/olympus/atlas v0.0.0
-	github.com/svallejo-dev/olympus/hermes v0.0.0
+	github.com/svallejo-dev/olympus-core/atlas v0.0.0
+	github.com/svallejo-dev/olympus-core/hermes v0.0.0
 )
 
 require (
@@ -45,6 +45,6 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
-replace github.com/svallejo-dev/olympus/atlas => ../atlas
+replace github.com/svallejo-dev/olympus-core/atlas => ../atlas
 
-replace github.com/svallejo-dev/olympus/hermes => ../hermes
+replace github.com/svallejo-dev/olympus-core/hermes => ../hermes

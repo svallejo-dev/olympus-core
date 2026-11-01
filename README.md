@@ -1,4 +1,4 @@
-# olympus
+# olympus-core
 
 SDKs de Go para resolver lo que cada servicio vuelve a escribir: arrancar la app como API
 con valores de producción y llamar a otras APIs con resiliencia. Proyecto hermano de
@@ -7,8 +7,8 @@ cero ceremonia, pero exclusivo para Go.
 
 | SDK | Para qué | Instalar |
 |---|---|---|
-| [`atlas`](atlas) | Arranca la app como API (`:8080`), con `/livez`, `/readyz`, `/healthz`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus/atlas@latest` |
-| [`hermes`](hermes) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus/hermes@latest` |
+| [`atlas`](atlas) | Arranca la app como API (`:8080`), con `/livez`, `/readyz`, `/healthz`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas@latest` |
+| [`hermes`](hermes) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus-core/hermes@latest` |
 
 Atlas sostiene tu app; hermes lleva sus mensajes a otras APIs. Los próximos SDKs seguirán
 con figuras del Olimpo que cualquiera reconoce.
@@ -32,7 +32,7 @@ con figuras del Olimpo que cualquiera reconoce.
 ```sh
 go env -w GOPRIVATE=github.com/svallejo-dev/*
 git config --global url."git@github.com:".insteadOf "https://github.com/"   # o un token HTTPS
-go get github.com/svallejo-dev/olympus/atlas@latest
+go get github.com/svallejo-dev/olympus-core/atlas@latest
 ```
 
 ## Versiones

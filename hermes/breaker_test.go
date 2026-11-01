@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 func TestBreakerOpensFailsFastAndRecovers(t *testing.T) {

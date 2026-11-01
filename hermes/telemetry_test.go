@@ -15,7 +15,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 func TestMetricsAreRecorded(t *testing.T) {

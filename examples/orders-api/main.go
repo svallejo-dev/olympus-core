@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/svallejo-dev/olympus/atlas"
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/atlas"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 func main() {

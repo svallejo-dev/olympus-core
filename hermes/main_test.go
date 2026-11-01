@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 // TestMain fails the run when goroutines started by the tests outlive them. It avoids a goleak

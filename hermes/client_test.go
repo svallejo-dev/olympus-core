@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes"
 )
 
 func TestNewRejectsInvalidConfiguration(t *testing.T) {

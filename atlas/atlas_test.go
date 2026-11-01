@@ -22,7 +22,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 
-	"github.com/svallejo-dev/olympus/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas"
 )
 
 const waitTimeout = 10 * time.Second
