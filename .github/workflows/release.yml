@@ -1,0 +1,67 @@
+name: release
+
+# A tag <module>/vX.Y.Z (e.g. atlas/v0.1.0) releases only that module.
+on:
+  push:
+    tags:
+      - "atlas/v*"
+      - "hermes/v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag
+        id: tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "module=${tag%%/v*}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ steps.tag.outputs.module }}/go.mod
+          cache-dependency-path: ${{ steps.tag.outputs.module }}/go.sum
+
+      - name: Test
+        working-directory: ${{ steps.tag.outputs.module }}
+        run: go test -race -count=1 ./...
+
+      - name: Release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          MODULE: ${{ steps.tag.outputs.module }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          prev=$(git tag --list "$MODULE/v*" --sort=-v:refname | grep -vx "$TAG" | head -n1 || true)
+          range="${prev:+$prev..}$TAG"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "go get github.com/svallejo-dev/olympus/$MODULE@$VERSION"
+            echo '```'
+            echo
+            echo "## Changes"
+            echo
+            git log --no-merges --pretty='- %s (%h)' "$range" -- "$MODULE"
+          } > notes.md
+          cat notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          MODULE: ${{ steps.tag.outputs.module }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: gh release create "$TAG" --title "$MODULE $VERSION" --notes-file notes.md --verify-tag
