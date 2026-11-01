@@ -7,7 +7,7 @@ cero ceremonia, pero exclusivo para Go.
 
 | SDK | Para qué | Instalar |
 |---|---|---|
-| [`atlas`](atlas) | Arranca la app como API (`:8080`), con `/livez`, `/readyz`, `/healthz`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas@latest` |
+| [`atlas`](atlas) | Arranca la app como API (`:8080`), con `/health`, `/ping`, `/liveness`, `/readiness`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas@latest` |
 | [`hermes`](hermes) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus-core/hermes@latest` |
 
 Atlas sostiene tu app; hermes lleva sus mensajes a otras APIs. Los próximos SDKs seguirán

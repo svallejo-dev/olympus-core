@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -49,12 +50,18 @@ type health struct {
 	checks []*check
 }
 
-func (h *health) livez(w http.ResponseWriter, _ *http.Request) {
+func ping(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, "pong")
+}
+
+func (h *health) liveness(w http.ResponseWriter, _ *http.Request) {
 	writeReport(w, report{Status: statusOK})
 }
 
-// readyz hides error details: in shared mode it is public, and errors can carry internal addresses.
-func (h *health) readyz(w http.ResponseWriter, r *http.Request) {
+// readiness hides error details: in shared mode it is public, and errors can carry internal addresses.
+func (h *health) readiness(w http.ResponseWriter, r *http.Request) {
 	if !h.ready.Load() {
 		writeReport(w, report{Status: statusUnavailable})
 		return
@@ -62,7 +69,7 @@ func (h *health) readyz(w http.ResponseWriter, r *http.Request) {
 	writeReport(w, h.run(r.Context(), func(error) string { return "fail" }))
 }
 
-func (h *health) healthz(w http.ResponseWriter, r *http.Request) {
+func (h *health) detailed(w http.ResponseWriter, r *http.Request) {
 	writeReport(w, h.run(r.Context(), func(err error) string { return "error: " + err.Error() }))
 }
 
@@ -137,6 +144,7 @@ func (c *check) call(ctx context.Context) (err error) {
 	}()
 	return c.fn(ctx)
 }
+
 func writeReport(w http.ResponseWriter, rep report) {
 	code := http.StatusOK
 	if rep.Status != statusOK {

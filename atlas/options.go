@@ -169,7 +169,7 @@ func WithServiceName(name string) Option {
 	return func(c *config) { c.serviceName = name }
 }
 
-// WithReadinessCheck adds a check run concurrently, with a 2s timeout, by /readyz and /healthz; names must be unique.
+// WithReadinessCheck adds a check run concurrently, with a 2s timeout, by /readiness and /health; names must be unique.
 func WithReadinessCheck(name string, fn Check) Option {
 	return func(c *config) {
 		c.checks = append(c.checks, &check{name: name, fn: fn, timeout: checkTimeout})
@@ -196,7 +196,7 @@ func WithPrometheusGatherer(g prometheus.Gatherer) Option {
 	return func(c *config) { c.gatherers = append(c.gatherers, g) }
 }
 
-// WithShutdownDelay sets how long /readyz reports 503 before the servers stop accepting connections.
+// WithShutdownDelay sets how long /readiness reports 503 before the servers stop accepting connections.
 func WithShutdownDelay(d time.Duration) Option {
 	return func(c *config) { c.shutdownDelay = d }
 }

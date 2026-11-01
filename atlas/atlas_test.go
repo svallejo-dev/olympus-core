@@ -193,7 +193,7 @@ func TestRunServesAppAndOpsEndpoints(t *testing.T) {
 	if got := get(t, svc.url+"/hello"); got.status != http.StatusOK || got.body != "hello" {
 		t.Errorf("GET /hello = %d %q, want 200 \"hello\"", got.status, got.body)
 	}
-	for _, path := range []string{"/livez", "/readyz", "/healthz", "/metrics"} {
+	for _, path := range []string{"/health", "/ping", "/liveness", "/readiness", "/metrics"} {
 		if got := get(t, svc.url+path); got.status != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200", path, got.status)
 		}
@@ -209,21 +209,21 @@ func TestRunServesAppAndOpsEndpoints(t *testing.T) {
 func TestOpsEndpointWinsOverAppRoute(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/liveness", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})
 	svc := start(t, mux)
 
-	if got := get(t, svc.url+"/livez"); got.status != http.StatusOK {
-		t.Errorf("GET /livez = %d, want 200 from atlas", got.status)
+	if got := get(t, svc.url+"/liveness"); got.status != http.StatusOK {
+		t.Errorf("GET /liveness = %d, want 200 from atlas", got.status)
 	}
-	resp, err := http.Post(svc.url+"/livez", "text/plain", nil)
+	resp, err := http.Post(svc.url+"/liveness", "text/plain", nil)
 	if err != nil {
-		t.Fatalf("POST /livez: %v", err)
+		t.Fatalf("POST /liveness: %v", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusTeapot {
-		t.Errorf("POST /livez = %d, want 418 from the app", resp.StatusCode)
+		t.Errorf("POST /liveness = %d, want 418 from the app", resp.StatusCode)
 	}
 }
 
@@ -265,7 +265,7 @@ func TestReadinessChecks(t *testing.T) {
 				atlas.WithReadinessCheck("db", tt.check),
 				atlas.WithReadinessCheck("cache", func(context.Context) error { return nil }),
 			)
-			for path, want := range map[string]healthReport{"/readyz": tt.wantReady, "/healthz": tt.wantHealth} {
+			for path, want := range map[string]healthReport{"/readiness": tt.wantReady, "/health": tt.wantHealth} {
 				got := get(t, svc.url+path)
 				if got.status != tt.wantStatus {
 					t.Errorf("GET %s = %d, want %d", path, got.status, tt.wantStatus)
@@ -282,20 +282,23 @@ func TestReadinessChecks(t *testing.T) {
 	}
 }
 
-func TestReadyzUnavailableDuringShutdownDelay(t *testing.T) {
+func TestReadinessUnavailableDuringShutdownDelay(t *testing.T) {
 	t.Parallel()
-	// The delay only has to outlast three loopback requests.
+	// The delay only has to outlast four loopback requests.
 	svc := start(t, helloMux(), atlas.WithShutdownDelay(time.Second))
 
 	svc.cancel()
 	svc.logs.waitFor(t, `"msg":"shutting down"`)
 
-	got := get(t, svc.url+"/readyz")
+	got := get(t, svc.url+"/readiness")
 	if got.status != http.StatusServiceUnavailable || decodeReport(t, got.body).Status != "unavailable" {
-		t.Errorf("GET /readyz while draining = %d %s, want 503 unavailable", got.status, got.body)
+		t.Errorf("GET /readiness while draining = %d %s, want 503 unavailable", got.status, got.body)
 	}
-	if got := get(t, svc.url+"/livez"); got.status != http.StatusOK {
-		t.Errorf("GET /livez while draining = %d, want 200", got.status)
+	if got := get(t, svc.url+"/liveness"); got.status != http.StatusOK {
+		t.Errorf("GET /liveness while draining = %d, want 200", got.status)
+	}
+	if got := get(t, svc.url+"/ping"); got.status != http.StatusOK || got.body != "pong" {
+		t.Errorf("GET /ping while draining = %d %q, want 200 \"pong\"", got.status, got.body)
 	}
 	if got := get(t, svc.url+"/hello"); got.status != http.StatusOK {
 		t.Errorf("GET /hello while draining = %d, want 200", got.status)
@@ -585,21 +588,21 @@ func TestAdminListenerSplitsOpsEndpoints(t *testing.T) {
 	adminLn := listenLocal(t)
 	adminURL := "http://" + adminLn.Addr().String()
 	mux := helloMux()
-	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "app livez")
+	mux.HandleFunc("GET /liveness", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "app liveness")
 	})
 	svc := start(t, mux, atlas.WithAdminListener(adminLn))
 
 	if got := get(t, svc.url+"/hello"); got.status != http.StatusOK {
 		t.Errorf("app GET /hello = %d, want 200", got.status)
 	}
-	if got := get(t, svc.url+"/livez"); got.body != "app livez" {
-		t.Errorf("app GET /livez = %q, want the app's handler", got.body)
+	if got := get(t, svc.url+"/liveness"); got.body != "app liveness" {
+		t.Errorf("app GET /liveness = %q, want the app's handler", got.body)
 	}
 	if got := get(t, svc.url+"/metrics"); got.status != http.StatusNotFound {
 		t.Errorf("app GET /metrics = %d, want 404", got.status)
 	}
-	for _, path := range []string{"/livez", "/readyz", "/healthz", "/metrics"} {
+	for _, path := range []string{"/health", "/ping", "/liveness", "/readiness", "/metrics"} {
 		if got := get(t, adminURL+path); got.status != http.StatusOK {
 			t.Errorf("admin GET %s = %d, want 200", path, got.status)
 		}
@@ -664,6 +667,7 @@ func TestRunRejectsInvalidConfiguration(t *testing.T) {
 		{"unclean ops pattern", atlas.WithOpsHandler("/debug/../vars", http.NotFoundHandler()), "not clean"},
 		{"root ops pattern", atlas.WithOpsHandler("/", http.NotFoundHandler()), "every path"},
 		{"reserved ops pattern", atlas.WithOpsHandler("/metrics", http.NotFoundHandler()), "reserved"},
+		{"reserved ping pattern", atlas.WithOpsHandler("/ping", http.NotFoundHandler()), "reserved"},
 		{"nil gatherer", atlas.WithPrometheusGatherer(nil), "prometheus gatherer is nil"},
 	}
 	for _, tt := range tests {

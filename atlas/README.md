@@ -5,7 +5,7 @@ mismo `main` en cada proyecto. Recibe tu `http.Handler` (un `http.ServeMux`, chi
 Gin...) y se encarga del resto:
 
 - escucha en `:8080` (o `$PORT`) con timeouts de servidor razonables;
-- expone `/livez`, `/readyz`, `/healthz` y `/metrics`;
+- expone `/health`, `/ping`, `/liveness`, `/readiness` y `/metrics`;
 - recupera panics, asigna un request ID y escribe un access log con `slog`;
 - instrumenta con OpenTelemetry (métricas en Prometheus, trazas por OTLP);
 - ejecuta trabajos en segundo plano atados al ciclo de vida del servicio;
@@ -79,12 +79,13 @@ con nombre repetido, nombres vacíos, checks, hooks, trabajos o handlers `nil`, 
 
 | Ruta | Responde | Uso |
 |---|---|---|
-| `GET /livez` | `200 {"status":"ok"}` mientras el proceso vive | liveness probe |
-| `GET /readyz` | `503` antes de empezar a servir y durante el apagado; si no, ejecuta los checks: `200` o `503` con `ok`/`fail` por check | readiness probe / balanceador |
-| `GET /healthz` | el informe detallado de los checks (`200` o `503`), sin mirar si el servicio está drenando | diagnóstico, dashboards |
+| `GET /health` | el informe detallado de los checks (`200` o `503`), sin mirar si el servicio está drenando | diagnóstico, dashboards |
+| `GET /ping` | `200 pong`, sin mirar nada más | comprobar a mano o desde un balanceador que el servicio responde |
+| `GET /liveness` | `200 {"status":"ok"}` mientras el proceso vive | liveness probe |
+| `GET /readiness` | `503` antes de empezar a servir y durante el apagado; si no, ejecuta los checks: `200` o `503` con `ok`/`fail` por check | readiness probe / balanceador |
 | `GET /metrics` | métricas en formato Prometheus | scraping |
 
-`/readyz` solo dice qué check falla; `/healthz` añade el mensaje de error, que puede llevar
+`/readiness` solo dice qué check falla; `/health` añade el mensaje de error, que puede llevar
 direcciones internas o detalles de la conexión:
 
 ```json
@@ -96,14 +97,14 @@ direcciones internas o detalles de la conexión:
   como error. Si un check ignora el contexto y sigue en marcha tras el timeout, las sondas
   siguientes lo dan por fallido (`still running after timeout`) sin lanzar otra goroutine hasta que
   termine; las sondas que llegan mientras un check está en curso esperan a esa misma ejecución.
-- `/livez` no ejecuta checks a propósito: si la base de datos cae, reiniciar el pod no la arregla
+- `/liveness` no ejecuta checks a propósito: si la base de datos cae, reiniciar el pod no la arregla
   y Kubernetes acabaría reiniciando todas las réplicas a la vez. La dependencia caída se refleja
-  en `/readyz`, que saca el pod del balanceo sin matarlo.
+  en `/readiness`, que saca el pod del balanceo sin matarlo.
 - En el servidor compartido, atlas mira el método y el path exactos antes de llamar a tu handler:
-  `GET` o `HEAD` sobre uno de estos cuatro paths los atiende atlas; todo lo demás (otros métodos,
-  `/livez/`, `//livez`...) llega a tu app tal cual, sin limpiar el path ni redirigir.
+  `GET` o `HEAD` sobre uno de estos cinco paths los atiende atlas; todo lo demás (otros métodos,
+  `/liveness/`, `//liveness`...) llega a tu app tal cual, sin limpiar el path ni redirigir.
 - Con `WithAdminAddr(":9090")` estos endpoints se sirven **solo** en ese puerto y tu handler queda
-  solo en el principal. Úsalo si no quieres exponer `/metrics` ni `/healthz` al exterior.
+  solo en el principal. Úsalo si no quieres exponer `/metrics` ni `/health` al exterior.
 
 ### Ampliar el servidor de operación
 
@@ -182,9 +183,9 @@ Al recibir SIGINT/SIGTERM (o al cancelar el contexto de `Run`, o si falla un ser
 en segundo plano):
 
 1. Se deja de escuchar señales: un segundo Ctrl-C mata el proceso de inmediato.
-2. `/readyz` pasa a `503` y se registra `shutting down`.
+2. `/readiness` pasa a `503` y se registra `shutting down`.
 3. Se espera el retardo de drenado, para que el balanceador o Kubernetes dejen de enviar tráfico.
-   Durante ese tiempo se siguen atendiendo peticiones y `/livez` sigue en `200`.
+   Durante ese tiempo se siguen atendiendo peticiones y `/liveness` sigue en `200`.
 4. A la vez: `Shutdown` de los servidores, que dejan de aceptar conexiones y esperan a las
    peticiones en curso, y cancelación del contexto de los trabajos en segundo plano, a los que se
    espera.

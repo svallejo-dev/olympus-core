@@ -54,7 +54,7 @@ func TestAppSeesRawPaths(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			svc := start(t, echoPath("app"), opts...)
-			for _, target := range []string{"//a//b", "/a/../b", "/a/./b", "//livez"} {
+			for _, target := range []string{"//a//b", "/a/../b", "/a/./b", "//liveness"} {
 				got := rawGet(t, svc.url, target)
 				if want := "app GET " + target; got.status != http.StatusOK || got.body != want {
 					t.Errorf("GET %s = %d %q, want 200 %q", target, got.status, got.body, want)
@@ -82,7 +82,7 @@ func TestOpsHandler(t *testing.T) {
 			"/debug/pprof/heap":          "pprof GET /debug/pprof/heap",
 			"/debug/pprof/cmdline/extra": "cmdline GET /debug/pprof/cmdline/extra",
 			"/debug/pprof":               "app GET /debug/pprof",
-			"/livez/":                    "app GET /livez/",
+			"/liveness/":                 "app GET /liveness/",
 		} {
 			if got := rawGet(t, svc.url, target); got.body != want {
 				t.Errorf("GET %s = %d %q, want %q", target, got.status, got.body, want)

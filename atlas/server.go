@@ -91,10 +91,11 @@ func newOpsRouter(h *health, metrics http.Handler, cfg *config, next http.Handle
 	wrap := func(h http.Handler) http.Handler { return recoverPanics(cfg.logger, h) }
 	o := &opsRouter{
 		probes: map[string]http.Handler{
-			"/livez":   wrap(http.HandlerFunc(h.livez)),
-			"/readyz":  wrap(http.HandlerFunc(h.readyz)),
-			"/healthz": wrap(http.HandlerFunc(h.healthz)),
-			"/metrics": wrap(metrics),
+			"/health":    wrap(http.HandlerFunc(h.detailed)),
+			"/ping":      wrap(http.HandlerFunc(ping)),
+			"/liveness":  wrap(http.HandlerFunc(h.liveness)),
+			"/readiness": wrap(http.HandlerFunc(h.readiness)),
+			"/metrics":   wrap(metrics),
 		},
 		exact: make(map[string]http.Handler),
 		next:  next,
@@ -148,7 +149,7 @@ func validateOpsPattern(pattern string) error {
 		return fmt.Errorf("ops handler %q: path is not clean, want %q", pattern, clean)
 	case pattern == "/":
 		return fmt.Errorf("ops handler %q: would take every path of the server", pattern)
-	case slices.Contains([]string{"/livez", "/readyz", "/healthz", "/metrics"}, pattern):
+	case slices.Contains([]string{"/health", "/ping", "/liveness", "/readiness", "/metrics"}, pattern):
 		return fmt.Errorf("ops handler %q: path is reserved for atlas", pattern)
 	}
 	return nil
