@@ -38,7 +38,7 @@ type User struct {
 	Name string `json:"name"`
 }
 
-u, err := hermes.GetJSON[User](ctx, c, "/users/42") // GET https://api.example.com/v1/users/42
+u, err := hermes.Get[User](ctx, c, "/users/42") // GET https://api.example.com/v1/users/42
 if statusErr, ok := errors.AsType[*hermes.StatusError](err); ok && statusErr.StatusCode == http.StatusNotFound {
 	return ErrUserNotFound
 }
@@ -46,13 +46,13 @@ if err != nil {
 	return fmt.Errorf("get user: %w", err)
 }
 
-created, err := hermes.PostJSON[User](ctx, c, "/users", User{Name: "Ada"},
+created, err := hermes.Post[User](ctx, c, "/users", User{Name: "Ada"},
 	hermes.IdempotencyKey(requestID), // un POST solo se reintenta si se sabe idempotente
 	hermes.Query(url.Values{"notify": {"true"}}),
 )
 ```
 
-- Los helpers JSON devuelven `*hermes.StatusError` para cualquier respuesta no-2xx, con
+- `Get`, `Post` y los demás esperan JSON y devuelven `*hermes.StatusError` para cualquier respuesta no-2xx, con
   `Method`, `URL` (sin credenciales ni query, se puede loguear), `StatusCode`, `Header` (las
   cabeceras de la respuesta) y los primeros 4 KiB de `Body`. Un 204 o un cuerpo vacío devuelven
   el valor cero de `T`.
@@ -64,6 +64,64 @@ created, err := hermes.PostJSON[User](ctx, c, "/users", User{Name: "Ada"},
   `errors.Is(err, context.DeadlineExceeded)`; una cancelación del llamador, `context.Canceled`.
 - El `path` se concatena a la ruta del base URL (`/v1` + `/users` = `/v1/users`) y se conservan
   la query del base URL y la del path. Un path absoluto (`https://...`) es un error.
+
+## Tres niveles de control
+
+| Quieres | Usa | Quién cierra el body |
+|---|---|---|
+| El resultado JSON | `Get`, `Post`, `Put`, `Patch`, `Delete`, o `Send` para otro método | hermes |
+| El resultado JSON y las cabeceras de la respuesta | `Do` y luego `Decode` | hermes (`Decode`) |
+| Streaming u otro formato | `Do` y leer `resp.Body` | Tú |
+
+Los dos primeros comprueban el status, limitan el tamaño, decodifican, y cierran el body para liberar la
+conexión y el hueco de `WithMaxConcurrent`. Para los casos en que necesitas la respuesta, como paginar:
+
+```go
+req, err := c.NewRequest(ctx, http.MethodGet, "/users", nil)
+if err != nil {
+	return err
+}
+resp, err := c.Do(req)
+if err != nil {
+	return err
+}
+users, err := hermes.Decode[[]User](c, resp)
+if err != nil {
+	return err
+}
+next := resp.Header.Get("Link")
+```
+
+Si usas `Do` sin `Decode`, cierra `resp.Body` siempre, o esa llamada retiene su hueco de
+`WithMaxConcurrent`.
+
+### Dónde va hermes en tu aplicación
+
+hermes decodifica la respuesta; convertirla a tu dominio es trabajo de tu código. `T` debería ser el
+contrato de la API externa, y hermes debería conocerse solo en el adaptador que la llama:
+
+```go
+// catalog/client.go
+type productResponse struct {
+	ID         string `json:"id"`
+	PriceCents int64  `json:"price_cents"`
+}
+
+func (c *Client) FindProduct(ctx context.Context, id string) (order.Product, error) {
+	res, err := hermes.Get[productResponse](ctx, c.http, "/products/"+id)
+	if statusErr, ok := errors.AsType[*hermes.StatusError](err); ok && statusErr.StatusCode == http.StatusNotFound {
+		return order.Product{}, order.ErrProductNotFound
+	}
+	if err != nil {
+		return order.Product{}, fmt.Errorf("find product %s: %w", id, err)
+	}
+	return order.NewProduct(res.ID, res.PriceCents)
+}
+```
+
+Si la API externa renombra un campo, solo cambia este archivo. Y como `Get` es una función genérica, no
+puede formar parte de una interfaz: la interfaz que uses en tus tests debe ser la de tu adaptador, como
+`FindProduct`, no la de hermes.
 
 ## Valores por defecto
 
@@ -100,7 +158,7 @@ Se reintenta una petición cuando se cumple **todo** esto:
 2. El método es idempotente (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`, `TRACE`), o la petición
    cumple alguna regla de [idempotencia](#post-y-patch-idempotentes).
 3. El body se puede rebobinar: sin body, o con `req.GetBody` (lo pone `http.NewRequest` para
-   `bytes.Reader`, `bytes.Buffer` y `strings.Reader`; los helpers JSON siempre lo cumplen).
+   `bytes.Reader`, `bytes.Buffer` y `strings.Reader`; `Send` y sus atajos siempre lo cumplen).
 4. El resultado es reintentable: error de transporte (incluido un timeout de intento) o estado
    429, 502, 503 o 504. `RetryPolicy.ShouldRetry` sustituye esta clasificación.
 
@@ -132,12 +190,12 @@ payments, err := hermes.New(baseURL, hermes.WithRetry(hermes.RetryPolicy{
 }))
 
 // La clave va en el body: cada reintento reenvía el mismo body, y por tanto la misma clave.
-charge, err := hermes.PostJSON[Charge](ctx, payments, "/v1/payments", Payment{Key: key, Amount: 100})
+charge, err := hermes.Post[Charge](ctx, payments, "/v1/payments", Payment{Key: key, Amount: 100})
 ```
 
 hermes no busca la clave ni comprueba que exista: solo decide si puede repetir la petición. Las
 cabeceras que pone `WithHeader` no cuentan para `IdempotencyHeader`, porque se añaden después de
-esa decisión. `hermes.Idempotent()` solo se aplica a los helpers JSON; con `Do` o `HTTPClient()`
+esa decisión. `hermes.Idempotent()` solo se aplica a `Send` y sus atajos; con `Do` o `HTTPClient()`
 usa `IsIdempotent`, que no debe consumir el body.
 
 ## Circuit breaker

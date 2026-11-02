@@ -158,7 +158,7 @@ func TestErrorTypeNamesTheFailure(t *testing.T) {
 		t.Cleanup(cancel)
 		return ctx
 	}
-	fetch := func(ctx context.Context, c *hermes.Client) { _, _ = hermes.GetJSON[struct{}](ctx, c, "/") }
+	fetch := func(ctx context.Context, c *hermes.Client) { _, _ = hermes.Get[struct{}](ctx, c, "/") }
 
 	tests := []struct {
 		name    string

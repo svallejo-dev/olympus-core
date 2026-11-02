@@ -14,10 +14,10 @@ import (
 // maxErrorBodyBytes caps StatusError.Body.
 const maxErrorBodyBytes = 4 << 10
 
-// RequestOption adjusts a request built by the JSON helpers just before it is sent.
+// RequestOption adjusts a request built by Send and its shorthands just before it is sent.
 type RequestOption func(*http.Request)
 
-// Header sets a request header, overriding the Client's defaults and the helpers' Accept and Content-Type.
+// Header sets a request header, overriding the Client's defaults and Send's Accept and Content-Type.
 func Header(key, value string) RequestOption {
 	return func(r *http.Request) { r.Header.Set(key, value) }
 }
@@ -53,7 +53,7 @@ func Query(values url.Values) RequestOption {
 	}
 }
 
-// StatusError is returned by the JSON helpers for a non-2xx response.
+// StatusError is returned by Send, its shorthands and Decode for a non-2xx response.
 type StatusError struct {
 	// Method is the request method.
 	Method string
@@ -71,8 +71,8 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("hermes: %s %s: %d %s", e.Method, e.URL, e.StatusCode, http.StatusText(e.StatusCode))
 }
 
-// DoJSON sends in as JSON (nil sends no body) and decodes a 2xx response into T; a 204 or empty body yields the zero T, and a non-2xx yields a *StatusError.
-func DoJSON[T any](ctx context.Context, c *Client, method, path string, in any, opts ...RequestOption) (T, error) {
+// Send sends in as JSON (nil sends no body) and decodes the response as Decode does.
+func Send[T any](ctx context.Context, c *Client, method, path string, in any, opts ...RequestOption) (T, error) {
 	var zero T
 	body, err := encodeJSON(in)
 	if err != nil {
@@ -90,10 +90,50 @@ func DoJSON[T any](ctx context.Context, c *Client, method, path string, in any, 
 		opt(req)
 	}
 
-	resp, err := c.Do(req)
+	resp, err := c.Do(req) //nolint:bodyclose // decode closes it
 	if err != nil {
 		return zero, err
 	}
+	return decode[T](c, req, resp)
+}
+
+// Get is Send with GET and no request body.
+func Get[T any](ctx context.Context, c *Client, path string, opts ...RequestOption) (T, error) {
+	return Send[T](ctx, c, http.MethodGet, path, nil, opts...)
+}
+
+// Post is Send with POST; it is retried only when known to be idempotent, see Idempotent and RetryPolicy.
+func Post[T any](ctx context.Context, c *Client, path string, in any, opts ...RequestOption) (T, error) {
+	return Send[T](ctx, c, http.MethodPost, path, in, opts...)
+}
+
+// Put is Send with PUT.
+func Put[T any](ctx context.Context, c *Client, path string, in any, opts ...RequestOption) (T, error) {
+	return Send[T](ctx, c, http.MethodPut, path, in, opts...)
+}
+
+// Patch is Send with PATCH; it is retried only when known to be idempotent, see Idempotent and RetryPolicy.
+func Patch[T any](ctx context.Context, c *Client, path string, in any, opts ...RequestOption) (T, error) {
+	return Send[T](ctx, c, http.MethodPatch, path, in, opts...)
+}
+
+// Delete is Send with DELETE and no request body.
+func Delete[T any](ctx context.Context, c *Client, path string, opts ...RequestOption) (T, error) {
+	return Send[T](ctx, c, http.MethodDelete, path, nil, opts...)
+}
+
+// Decode reads a JSON response from Do into T, up to the Client's size limit, and closes its body; a 204 or empty body yields the zero T, and a non-2xx yields a *StatusError.
+func Decode[T any](c *Client, resp *http.Response) (T, error) {
+	req := resp.Request
+	if req == nil {
+		// Only http.Transport fills in resp.Request, and WithTransport accepts any RoundTripper.
+		req = &http.Request{URL: &url.URL{}}
+	}
+	return decode[T](c, req, resp)
+}
+
+func decode[T any](c *Client, req *http.Request, resp *http.Response) (T, error) {
+	var zero T
 	defer drainAndClose(resp)
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -105,7 +145,7 @@ func DoJSON[T any](ctx context.Context, c *Client, method, path string, in any, 
 	}
 	limited := &io.LimitedReader{R: resp.Body, N: c.maxResponseBytes + 1}
 	var out T
-	err = json.NewDecoder(limited).Decode(&out)
+	err := json.NewDecoder(limited).Decode(&out)
 	switch {
 	case limited.N <= 0:
 		return zero, fmt.Errorf("hermes: %s %s: response body exceeds %d bytes", req.Method, redactURL(req.URL), c.maxResponseBytes)
@@ -115,16 +155,6 @@ func DoJSON[T any](ctx context.Context, c *Client, method, path string, in any, 
 		return zero, fmt.Errorf("hermes: decode %s %s response: %w", req.Method, redactURL(req.URL), err)
 	}
 	return out, nil
-}
-
-// GetJSON is DoJSON with GET and no request body.
-func GetJSON[T any](ctx context.Context, c *Client, path string, opts ...RequestOption) (T, error) {
-	return DoJSON[T](ctx, c, http.MethodGet, path, nil, opts...)
-}
-
-// PostJSON is DoJSON with POST; it is retried only when known to be idempotent, see Idempotent and RetryPolicy.
-func PostJSON[T any](ctx context.Context, c *Client, path string, in any, opts ...RequestOption) (T, error) {
-	return DoJSON[T](ctx, c, http.MethodPost, path, in, opts...)
 }
 
 // encodeJSON returns a *bytes.Reader so http.NewRequest sets GetBody and retries can replay the body.

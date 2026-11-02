@@ -23,7 +23,7 @@ type order struct {
 func getOrder(catalog *hermes.Client) func(http.ResponseWriter, *http.Request) error {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		id := r.PathValue("id")
-		p, err := hermes.GetJSON[product](r.Context(), catalog, "/products/sku-"+id)
+		p, err := hermes.Get[product](r.Context(), catalog, "/products/sku-"+id)
 		if err != nil {
 			return catalogError(id, err)
 		}

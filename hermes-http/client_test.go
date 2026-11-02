@@ -98,7 +98,7 @@ func TestDefaultHeadersAndUserAgent(t *testing.T) {
 		hermes.WithHeader("X-Tenant", "acme"),
 	)
 
-	if _, err := hermes.GetJSON[struct{}](t.Context(), c, "/", hermes.Header("X-Tenant", "override")); err != nil {
+	if _, err := hermes.Get[struct{}](t.Context(), c, "/", hermes.Header("X-Tenant", "override")); err != nil {
 		t.Fatal(err)
 	}
 	h := <-got
@@ -161,8 +161,8 @@ func TestClientIsSafeForConcurrentUse(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, err := hermes.GetJSON[map[string]int](t.Context(), c, "/"); err != nil {
-				t.Errorf("GetJSON: %v", err)
+			if _, err := hermes.Get[map[string]int](t.Context(), c, "/"); err != nil {
+				t.Errorf("Get: %v", err)
 			}
 		})
 	}
@@ -203,9 +203,9 @@ func TestTransportErrorRedactsURL(t *testing.T) {
 	failing := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("connection refused") })
 	c := newClient(t, "http://user:secret@api.test", hermes.WithTransport(failing), hermes.WithoutRetry())
 
-	_, jsonErr := hermes.GetJSON[struct{}](t.Context(), c, "/orders?token=s3cr3t")
+	_, jsonErr := hermes.Get[struct{}](t.Context(), c, "/orders?token=s3cr3t")
 	_, doErr := get(t, c, "/orders?token=s3cr3t")
-	for name, err := range map[string]error{"GetJSON": jsonErr, "Do": doErr} {
+	for name, err := range map[string]error{"Get": jsonErr, "Do": doErr} {
 		urlErr, ok := errors.AsType[*url.Error](err)
 		if !ok {
 			t.Fatalf("%s: err = %v, want a *url.Error", name, err)
@@ -230,8 +230,8 @@ func TestNilResponseBodyIsReplaced(t *testing.T) {
 	if code := mustGet(t, c, "/"); code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", code)
 	}
-	if _, err := hermes.GetJSON[struct{}](t.Context(), c, "/"); err != nil {
-		t.Errorf("GetJSON: %v", err)
+	if _, err := hermes.Get[struct{}](t.Context(), c, "/"); err != nil {
+		t.Errorf("Get: %v", err)
 	}
 }
 

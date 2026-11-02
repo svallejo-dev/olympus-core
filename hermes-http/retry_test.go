@@ -20,9 +20,9 @@ func TestRetrySucceedsAfterTransientFailures(t *testing.T) {
 	h, hits := statusSequence(503, 503, 200)
 	c := newClient(t, newServer(t, h).URL)
 
-	got, err := hermes.GetJSON[struct{ Attempt int }](t.Context(), c, "/")
+	got, err := hermes.Get[struct{ Attempt int }](t.Context(), c, "/")
 	if err != nil {
-		t.Fatalf("GetJSON: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got.Attempt != 3 || hits.Load() != 3 {
 		t.Errorf("attempt = %d, hits = %d; want 3 and 3", got.Attempt, hits.Load())
@@ -40,10 +40,10 @@ func TestRetryExhaustedReturnsLastResponse(t *testing.T) {
 		t.Errorf("hits = %d, want 3", hits.Load())
 	}
 
-	_, err := hermes.GetJSON[map[string]any](t.Context(), c, "/")
+	_, err := hermes.Get[map[string]any](t.Context(), c, "/")
 	statusErr, ok := errors.AsType[*hermes.StatusError](err)
 	if !ok || statusErr.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("GetJSON err = %v, want *StatusError 503", err)
+		t.Fatalf("Get err = %v, want *StatusError 503", err)
 	}
 	if hits.Load() != 6 {
 		t.Errorf("hits = %d, want 6", hits.Load())
@@ -68,7 +68,7 @@ func TestRetryNonIdempotentRequests(t *testing.T) {
 	t.Run("without idempotency key", func(t *testing.T) {
 		hits.Store(0)
 		c := newClient(t, srv.URL)
-		_, err := hermes.PostJSON[map[string]any](t.Context(), c, "/orders", in)
+		_, err := hermes.Post[map[string]any](t.Context(), c, "/orders", in)
 		if _, ok := errors.AsType[*hermes.StatusError](err); !ok || hits.Load() != 1 {
 			t.Errorf("err = %v, hits = %d; want StatusError after 1 attempt", err, hits.Load())
 		}
@@ -78,7 +78,7 @@ func TestRetryNonIdempotentRequests(t *testing.T) {
 		hits.Store(0)
 		bodies = nil
 		c := newClient(t, srv.URL)
-		_, err := hermes.PostJSON[map[string]any](t.Context(), c, "/orders", in, hermes.IdempotencyKey("k-1"))
+		_, err := hermes.Post[map[string]any](t.Context(), c, "/orders", in, hermes.IdempotencyKey("k-1"))
 		if err != nil || hits.Load() != 3 {
 			t.Fatalf("err = %v, hits = %d; want success after 3 attempts", err, hits.Load())
 		}
@@ -93,7 +93,7 @@ func TestRetryNonIdempotentRequests(t *testing.T) {
 		c := newClient(t, srv.URL, hermes.WithRetry(hermes.RetryPolicy{
 			InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond, RetryNonIdempotent: true,
 		}))
-		if _, err := hermes.PostJSON[map[string]any](t.Context(), c, "/orders", in); err != nil || hits.Load() != 3 {
+		if _, err := hermes.Post[map[string]any](t.Context(), c, "/orders", in); err != nil || hits.Load() != 3 {
 			t.Errorf("err = %v, hits = %d; want success after 3 attempts", err, hits.Load())
 		}
 	})
@@ -131,7 +131,7 @@ func TestIdempotencyRules(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h, hits := statusSequence(503, 200)
 			c := newClient(t, newServer(t, h).URL, hermes.WithRetry(tt.policy))
-			_, _ = hermes.PostJSON[map[string]any](t.Context(), c, tt.path, map[string]string{"key": "k-1"}, tt.opts...)
+			_, _ = hermes.Post[map[string]any](t.Context(), c, tt.path, map[string]string{"key": "k-1"}, tt.opts...)
 			if hits.Load() != tt.want {
 				t.Errorf("attempts = %d, want %d", hits.Load(), tt.want)
 			}
@@ -164,11 +164,11 @@ func TestIdempotentMarksOnlyItsRequest(t *testing.T) {
 	}))
 	ctx := t.Context()
 
-	_, _ = hermes.PostJSON[map[string]any](ctx, c, "/", map[string]string{}, hermes.Idempotent())
+	_, _ = hermes.Post[map[string]any](ctx, c, "/", map[string]string{}, hermes.Idempotent())
 	if hits.Load() != 2 {
 		t.Fatalf("marked request: attempts = %d, want 2", hits.Load())
 	}
-	_, _ = hermes.PostJSON[map[string]any](ctx, c, "/", map[string]string{})
+	_, _ = hermes.Post[map[string]any](ctx, c, "/", map[string]string{})
 	if hits.Load() != 3 {
 		t.Errorf("next request: attempts = %d, want 1", hits.Load()-2)
 	}
@@ -181,11 +181,11 @@ func TestIdempotentMarkDoesNotReachTheTokenCall(t *testing.T) {
 	}))
 	h, _ := statusSequence(200)
 	c := newClient(t, newServer(t, h).URL, hermes.WithBearerToken(func(ctx context.Context) (string, error) {
-		_, err := hermes.PostJSON[map[string]any](ctx, tokens, "/oauth/token", map[string]string{})
+		_, err := hermes.Post[map[string]any](ctx, tokens, "/oauth/token", map[string]string{})
 		return "", err
 	}))
 
-	_, _ = hermes.PostJSON[map[string]any](t.Context(), c, "/", map[string]string{}, hermes.Idempotent())
+	_, _ = hermes.Post[map[string]any](t.Context(), c, "/", map[string]string{}, hermes.Idempotent())
 	if tokenHits.Load() != 1 {
 		t.Errorf("token POST attempts = %d, want 1: nobody marked it idempotent", tokenHits.Load())
 	}

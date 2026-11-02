@@ -12,7 +12,7 @@ import (
 	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
-func ExampleGetJSON() {
+func ExampleGet() {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/users/42" {
 			http.NotFound(w, r)
@@ -31,13 +31,13 @@ func ExampleGetJSON() {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	}
-	u, err := hermes.GetJSON[user](context.Background(), c, "/users/42")
+	u, err := hermes.Get[user](context.Background(), c, "/users/42")
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(u.ID, u.Name)
 
-	_, err = hermes.GetJSON[user](context.Background(), c, "/users/7")
+	_, err = hermes.Get[user](context.Background(), c, "/users/7")
 	if statusErr, ok := errors.AsType[*hermes.StatusError](err); ok {
 		fmt.Println("status", statusErr.StatusCode)
 	}
@@ -75,4 +75,26 @@ func ExampleClient_HTTPClient() {
 	defer func() { _ = resp.Body.Close() }()
 	fmt.Println(resp.StatusCode)
 	// Output: 204
+}
+
+func ExampleDecode() {
+	c, err := hermes.New("https://api.example.com")
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx := context.Background()
+
+	req, err := c.NewRequest(ctx, http.MethodGet, "/users", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	users, err := hermes.Decode[[]string](c, resp)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(users, resp.Header.Get("Link"))
 }

@@ -41,7 +41,7 @@ func run() error {
 // catalogReachable keeps the instance out of rotation while the catalog API is unreachable.
 func catalogReachable(catalog *hermes.Client) atlas.Check {
 	return func(ctx context.Context) error {
-		_, err := hermes.GetJSON[struct{}](ctx, catalog, "/liveness")
+		_, err := hermes.Get[struct{}](ctx, catalog, "/liveness")
 		return err
 	}
 }
