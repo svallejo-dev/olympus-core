@@ -21,6 +21,13 @@ func callSafely(ctx context.Context, logger *slog.Logger, fn func() error, attrs
 }
 
 func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
+	respond := func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	}
+	return recoverPanicsWith(logger, respond, next)
+}
+
+func recoverPanicsWith(logger *slog.Logger, respond func(http.ResponseWriter, *http.Request), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		rec := recorderFor(w)
@@ -35,13 +42,12 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 			logPanic(ctx, logger, v,
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
-				slog.String("request_id", RequestID(ctx)),
 			)
 			if rec.status != 0 {
 				// Headers are gone; aborting makes the client see a broken response, not a truncated one that looks complete.
 				panic(http.ErrAbortHandler)
 			}
-			http.Error(rec, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			respond(rec, r)
 		}()
 		next.ServeHTTP(rec, r)
 	})

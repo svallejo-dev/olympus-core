@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -38,7 +40,19 @@ func withRequestID(next http.Handler) http.Handler {
 		next.ServeHTTP(w, req)
 		// otelhttp reads the route matched by an inner ServeMux from the request it passed down.
 		r.Pattern = req.Pattern
+		nameSpan(req)
 	})
+}
+
+// nameSpan follows the OpenTelemetry convention "METHOD /route", known only once a ServeMux has matched.
+func nameSpan(r *http.Request) {
+	switch {
+	case r.Pattern == "":
+	case strings.Contains(r.Pattern, " "):
+		trace.SpanFromContext(r.Context()).SetName(r.Pattern)
+	default:
+		trace.SpanFromContext(r.Context()).SetName(r.Method + " " + r.Pattern)
+	}
 }
 
 func validRequestID(id string) bool {
@@ -86,10 +100,6 @@ func logRequest(logger *slog.Logger, r *http.Request, rec *responseRecorder, ela
 		slog.Int("status", status),
 		slog.Int64("bytes", rec.bytes),
 		slog.Duration("duration", elapsed),
-		slog.String("request_id", RequestID(r.Context())),
-	}
-	if sc := trace.SpanContextFromContext(r.Context()); sc.IsValid() {
-		attrs = append(attrs, slog.String("trace_id", sc.TraceID().String()))
 	}
 	if aborted {
 		attrs = append(attrs, slog.Bool("aborted", true))
@@ -158,4 +168,33 @@ func (rec *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		rec.status = http.StatusSwitchingProtocols
 	}
 	return conn, rw, err
+}
+
+// contextHandler adds the request and trace IDs of the record's context, so logs from handlers can be correlated without calling atlas.
+type contextHandler struct {
+	slog.Handler
+}
+
+func (h contextHandler) Handle(ctx context.Context, record slog.Record) error {
+	record = record.Clone()
+	if id := RequestID(ctx); id != "" {
+		record.AddAttrs(slog.String("request_id", id))
+	}
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		record.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
+	}
+	return h.Handler.Handle(ctx, record)
+}
+
+// writesThroughLog reports slog's initial handler, which writes through package log.
+func (h contextHandler) writesThroughLog() bool {
+	return fmt.Sprintf("%T", h.Handler) == "*slog.defaultHandler"
+}
+
+func (h contextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return contextHandler{h.Handler.WithAttrs(attrs)}
+}
+
+func (h contextHandler) WithGroup(name string) slog.Handler {
+	return contextHandler{h.Handler.WithGroup(name)}
 }

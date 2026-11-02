@@ -1,4 +1,4 @@
-// Package atlas runs an http.Handler as a production HTTP service with health checks, telemetry and graceful shutdown.
+// Package atlas serves an API, built with its router or any http.Handler, as a production HTTP service with health checks, telemetry and graceful shutdown.
 package atlas
 
 import (
@@ -17,14 +17,17 @@ import (
 
 // Run serves handler (http.DefaultServeMux if nil) and the ops endpoints until ctx ends, SIGINT/SIGTERM arrives or a server or worker fails, then shuts down gracefully; nil means a clean stop.
 func Run(ctx context.Context, handler http.Handler, opts ...Option) error {
-	cfg := newConfig(opts)
+	if handler == nil {
+		handler = http.DefaultServeMux
+	}
+	return serve(ctx, handler, newConfig(opts))
+}
+
+func serve(ctx context.Context, handler http.Handler, cfg config) error {
 	if err := cfg.validate(); err != nil {
 		// Run promises to close the listeners it is given, even when it never serves.
 		closeListeners(cfg.listener, cfg.adminListener)
 		return err
-	}
-	if handler == nil {
-		handler = http.DefaultServeMux
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
+	"github.com/svallejo-dev/olympus-core/atlas-server"
 	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
@@ -20,24 +20,23 @@ type order struct {
 }
 
 // getOrder returns a fixed demo order whose product comes from the catalog API.
-func getOrder(catalog *hermes.Client) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func getOrder(catalog *hermes.Client) atlas.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) error {
 		id := r.PathValue("id")
 		p, err := hermes.GetJSON[product](r.Context(), catalog, "/products/sku-"+id)
-		var statusErr *hermes.StatusError
-		switch {
-		case errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound:
-			http.Error(w, "order not found", http.StatusNotFound)
-			return
-		case errors.Is(err, hermes.ErrCircuitOpen):
-			http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
-			return
-		case err != nil:
-			http.Error(w, "catalog error", http.StatusBadGateway)
-			return
+		if err != nil {
+			return catalogError(id, err)
 		}
+		return atlas.JSON(w, http.StatusOK, order{ID: id, Product: p})
+	}
+}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(order{ID: id, Product: p})
-	})
+func catalogError(id string, err error) error {
+	if statusErr, ok := errors.AsType[*hermes.StatusError](err); ok && statusErr.StatusCode == http.StatusNotFound {
+		return atlas.Errorf(http.StatusNotFound, "order %s not found", id)
+	}
+	if errors.Is(err, hermes.ErrCircuitOpen) {
+		return atlas.Errorf(http.StatusServiceUnavailable, "catalog unavailable: %w", err)
+	}
+	return atlas.Errorf(http.StatusBadGateway, "catalog error: %w", err)
 }

@@ -78,6 +78,8 @@ func listen(ctx context.Context, ln net.Listener, addr string) (net.Listener, er
 	return ln, nil
 }
 
+var opsPaths = []string{"/health", "/ping", "/liveness", "/readiness", "/metrics"}
+
 // opsRouter serves the ops endpoints and hands every other request to next untouched: no path
 // cleaning or redirects, unlike mounting the app under a ServeMux.
 type opsRouter struct {
@@ -149,7 +151,7 @@ func validateOpsPattern(pattern string) error {
 		return fmt.Errorf("ops handler %q: path is not clean, want %q", pattern, clean)
 	case pattern == "/":
 		return fmt.Errorf("ops handler %q: would take every path of the server", pattern)
-	case slices.Contains([]string{"/health", "/ping", "/liveness", "/readiness", "/metrics"}, pattern):
+	case slices.Contains(opsPaths, pattern):
 		return fmt.Errorf("ops handler %q: path is reserved for atlas", pattern)
 	}
 	return nil

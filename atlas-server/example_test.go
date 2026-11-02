@@ -16,6 +16,26 @@ import (
 	"github.com/svallejo-dev/olympus-core/atlas-server"
 )
 
+func ExampleNew() {
+	app := atlas.New(atlas.WithServiceName("orders"))
+	app.Get("/orders/{id}", func(w http.ResponseWriter, r *http.Request) error {
+		return atlas.JSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id")})
+	})
+
+	v1 := app.Group("/v1")
+	v1.Post("/orders", func(w http.ResponseWriter, r *http.Request) error {
+		in, err := atlas.Decode[map[string]any](w, r)
+		if err != nil {
+			return err
+		}
+		return atlas.JSON(w, http.StatusCreated, in)
+	})
+
+	if err := app.Run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+
 func ExampleRun() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {

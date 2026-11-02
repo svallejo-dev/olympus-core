@@ -1,17 +1,18 @@
 # olympus-core
 
-SDKs de Go para resolver lo que cada servicio vuelve a escribir: arrancar la app como API
+SDKs de Go para resolver lo que cada servicio vuelve a escribir: levantar la app como API
 con valores de producción y llamar a otras APIs con resiliencia. Proyecto hermano de
 [keel](https://github.com/svallejo-dev/keel-cli): misma filosofía de defaults sensatos y
 cero ceremonia, pero exclusivo para Go.
 
 | SDK | Para qué | Instalar |
 |---|---|---|
-| [`atlas-server`](atlas-server) | Arranca la app como API (`:8080`), con `/health`, `/ping`, `/liveness`, `/readiness`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas-server@latest` |
+| [`atlas-server`](atlas-server) | Levanta la app como API (`:8080`): rutas, middleware y errores estilo Express sobre `net/http`, con `/health`, `/ping`, `/liveness`, `/readiness`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas-server@latest` |
 | [`hermes-http`](hermes-http) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus-core/hermes-http@latest` |
 
-Atlas sostiene tu app; hermes lleva sus mensajes a otras APIs. Los próximos SDKs seguirán
-con figuras del Olimpo que cualquiera reconoce.
+Atlas sostiene tu app; hermes lleva sus mensajes a otras APIs. El nombre dice el papel y el sufijo
+el protocolo, así que los próximos SDKs seguirán esa forma (`hermes-grpc`, `atlas-grpc`). En el
+código, el paquete sigue siendo `atlas` o `hermes`, porque Go no admite guiones en ese nombre.
 
 ## Principios
 
@@ -24,8 +25,8 @@ con figuras del Olimpo que cualquiera reconoce.
 - **Wrappers de librerías probadas.** `net/http`, OpenTelemetry, `prometheus/client_golang`,
   `sony/gobreaker`, `x/time/rate`. Lo nuestro es la configuración y el pegamento.
 - **Defaults de producción, todo configurable** con opciones funcionales.
-- **Go idiomático**, sin frameworks que tomen el control: aceptan `http.Handler` y
-  `*http.Client` estándar.
+- **Sin acoplamiento.** Handlers y middlewares son funciones de `net/http`, sin tipos de contexto
+  propios; atlas también sirve cualquier `http.Handler` y hermes expone un `*http.Client` estándar.
 
 ## Instalación (repo privado)
 

@@ -1,8 +1,8 @@
-# atlas
+# atlas-server
 
-`atlas` arranca un servicio Go como API HTTP con valores de producción, para no reescribir el
-mismo `main` en cada proyecto. Recibe tu `http.Handler` (un `http.ServeMux`, chi, el engine de
-Gin...) y se encarga del resto:
+`atlas` levanta un servicio Go como API HTTP con valores de producción, para no reescribir el
+mismo `main` en cada proyecto. Tiene un router al estilo de Express sobre `http.ServeMux`, y también
+sirve cualquier `http.Handler` si prefieres chi o Gin. En ambos casos se encarga del resto:
 
 - escucha en `:8080` (o `$PORT`) con timeouts de servidor razonables;
 - expone `/health`, `/ping`, `/liveness`, `/readiness` y `/metrics`;
@@ -11,7 +11,8 @@ Gin...) y se encarga del resto:
 - ejecuta trabajos en segundo plano atados al ciclo de vida del servicio;
 - se apaga de forma ordenada con SIGINT/SIGTERM, compatible con Kubernetes.
 
-No impone framework: todo lo que añade son middlewares estándar alrededor de tu handler.
+No te acopla a atlas: tus handlers y middlewares son funciones de `net/http`, sin tipos de contexto
+propios, y se prueban con `httptest`.
 
 ## Instalación
 
@@ -44,35 +45,143 @@ import (
 	"github.com/svallejo-dev/olympus-core/atlas-server"
 )
 
+type order struct {
+	ID string `json:"id"`
+}
+
+func getOrder(w http.ResponseWriter, r *http.Request) error {
+	return atlas.JSON(w, http.StatusOK, order{ID: r.PathValue("id")})
+}
+
 func main() {
 	db, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hola, request " + atlas.RequestID(r.Context())))
-	})
-
-	err = atlas.Run(context.Background(), mux,
+	app := atlas.New(
 		atlas.WithServiceName("orders"),
 		atlas.WithReadinessCheck("postgres", db.PingContext),
 		atlas.WithShutdownHook("postgres", func(context.Context) error { return db.Close() }),
 	)
-	if err != nil {
+	app.Get("/orders/{id}", getOrder)
+
+	if err := app.Run(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 }
 ```
 
-`Run` bloquea hasta que llega una señal, se cancela el contexto o falla un servidor o un trabajo en
-segundo plano, y devuelve `nil` si el apagado fue limpio. Con `handler` a `nil` sirve
-`http.DefaultServeMux`, como `http.ListenAndServe(addr, nil)`.
+## Rutas y middleware
 
-Una configuración inválida hace que `Run` devuelva un error antes de escuchar: checks de readiness
-con nombre repetido, nombres vacíos, checks, hooks, trabajos o handlers `nil`, y patrones de
-`WithOpsHandler` no válidos. El error enumera todos los problemas a la vez, y los listeners de
+```go
+app := atlas.New()
+app.Use(requestTenant)                  // toda la app, incluidas las peticiones sin ruta
+
+app.Get("/orders/{id}", getOrder)       // r.PathValue("id")
+app.Get("/files/{path...}", getFile)    // captura el resto del path
+
+v1 := app.Group("/v1", requireAuth)     // prefijo + middleware del grupo
+v1.Post("/orders", createOrder, audit)  // middleware de una sola ruta
+v1.Delete("/orders/{id}", deleteOrder)
+
+app.Handle("GET /legacy", legacyHandler)  // cualquier http.Handler
+app.Mount("/admin", adminRouter)          // otro router, que ve el path sin "/admin"
+```
+
+- Un handler es cualquier `func(http.ResponseWriter, *http.Request) error`, y un middleware
+  cualquier `func(http.Handler) http.Handler`. Sirven los que ya existan para `net/http`, y tu código
+  no necesita importar atlas para escribirlos.
+- Hay `Get`, `Post`, `Put`, `Patch`, `Delete` y `Method(metodo, path, h)`. `Get` también atiende `HEAD`.
+- El path coincide **exacto**, también `/` y los que acaban en `/`. Para capturar el resto del path
+  usa `{nombre...}`. `app.Group("/v1").Get("/", h)` atiende `/v1`.
+- El orden de los middlewares es el de registro: los de la app, los del grupo y los de la ruta.
+  Los de `app.Use` también corren cuando ninguna ruta coincide, que es lo que necesita un CORS para
+  responder un preflight; a cambio, `r.PathValue` y `r.Pattern` aún no están disponibles ahí.
+- Llamar a `Use` después de registrar rutas o grupos provoca un panic, para que un `requireAuth` nunca
+  deje rutas sin proteger en silencio. Una ruta duplicada o en conflicto también, como en
+  `http.ServeMux`. Los dos ocurren al arrancar.
+- No hay parámetros con regex como `/{id:[0-9]+}`; esa validación va en el handler. `http.ServeMux`
+  limpia los paths y redirige con `307` (`//a` a `/a`, y `/a` a `/a/` si registraste `/a/`).
+- `App` es un `http.Handler`, así que se prueba sin levantar un servidor:
+
+```go
+rec := httptest.NewRecorder()
+app.ServeHTTP(rec, httptest.NewRequest("GET", "/orders/42", nil))
+```
+
+## Errores
+
+Si un handler devuelve un error, atlas responde en JSON con el formato de RFC 9457:
+
+```go
+func getOrder(w http.ResponseWriter, r *http.Request) error {
+	order, err := store.Find(r.Context(), r.PathValue("id"))
+	if errors.Is(err, ErrNotFound) {
+		return atlas.Errorf(http.StatusNotFound, "order %s not found", r.PathValue("id"))
+	}
+	if err != nil {
+		return fmt.Errorf("find order: %w", err) // 500 sin detalle; el mensaje va al log
+	}
+	return atlas.JSON(w, http.StatusOK, order)
+}
+```
+
+```json
+{"type":"about:blank","title":"Not Found","status":404,"detail":"order 42 not found","request_id":"..."}
+```
+
+El status sale de cualquier error de la cadena con un método `StatusCode() int`, así que tu dominio
+puede elegirlo sin importar atlas:
+
+```go
+type NotFoundError struct{ ID string }
+
+func (e NotFoundError) Error() string   { return "order " + e.ID + " not found" }
+func (e NotFoundError) StatusCode() int { return http.StatusNotFound }
+```
+
+| El handler devuelve | Status | `detail` | Log |
+|---|---|---|---|
+| Error con `StatusCode()` entre 400 y 499 | Ese status | El mensaje de ese error | No |
+| Error con `StatusCode()` entre 500 y 599 | Ese status | Ninguno | Sí, con el mensaje |
+| Cualquier otro error o status fuera de rango | `500` | Ninguno | Sí, con el mensaje |
+| `context.Canceled` porque el cliente se fue | `499` | Ninguno | No |
+| Un error después de empezar a responder | Se aborta la conexión | Ninguno | Sí, con el mensaje |
+
+Los panics y las respuestas `404` y `405` del router usan el mismo formato. `WithErrorHandler(fn)`
+cambia cómo se escribe la respuesta, con `fn` como `func(w, r, err)`; el log no cambia.
+
+## Leer y escribir JSON
+
+```go
+func createOrder(w http.ResponseWriter, r *http.Request) error {
+	in, err := atlas.Decode[CreateOrder](w, r) // ya trae su status: 400, 413 o 415
+	if err != nil {
+		return err
+	}
+	return atlas.JSON(w, http.StatusCreated, store.Create(r.Context(), in))
+}
+```
+
+`Decode` admite hasta 1 MiB (`DecodeLimit` para otro tope), acepta `application/json`, `*+json` o
+ninguna cabecera, ignora los campos desconocidos y rechaza un segundo valor tras el JSON. Es opcional,
+igual que `JSON`: puedes usar `encoding/json` directamente. Validar el contenido queda en tus manos.
+
+## Con otro router
+
+`atlas.Run(ctx, handler, opts...)` sirve cualquier `http.Handler` con todo lo anterior salvo el
+router y su formato de errores. Ver [Con Gin o chi](#con-gin-o-chi).
+
+## Arranque y apagado
+
+`app.Run` y `atlas.Run` bloquean hasta que llega una señal, se cancela el contexto o falla un servidor
+o un trabajo en segundo plano, y devuelven `nil` si el apagado fue limpio. Con `handler` a `nil`,
+`atlas.Run` sirve `http.DefaultServeMux`, como `http.ListenAndServe(addr, nil)`.
+
+Una configuración inválida devuelve un error antes de escuchar: checks de readiness
+con nombre repetido, nombres vacíos, checks, hooks, trabajos o handlers `nil`, patrones de
+`WithOpsHandler` no válidos y rutas de la `App` que chocan con un endpoint de operación. El error enumera todos los problemas a la vez, y los listeners de
 `WithListener` y `WithAdminListener` se cierran igualmente.
 
 ## Endpoints
@@ -103,6 +212,8 @@ direcciones internas o detalles de la conexión:
 - En el servidor compartido, atlas mira el método y el path exactos antes de llamar a tu handler:
   `GET` o `HEAD` sobre uno de estos cinco paths los atiende atlas; todo lo demás (otros métodos,
   `/liveness/`, `//liveness`...) llega a tu app tal cual, sin limpiar el path ni redirigir.
+- Con `app.Get("/health", h)`, `app.Run` falla al arrancar en vez de ocultar tu ruta. Con
+  `atlas.Run` y tu propio router no se puede detectar, y gana atlas.
 - Con `WithAdminAddr(":9090")` estos endpoints se sirven **solo** en ese puerto y tu handler queda
   solo en el principal. Úsalo si no quieres exponer `/metrics` ni `/health` al exterior.
 
@@ -122,7 +233,7 @@ atlas.Run(ctx, mux,
 - El patrón es un path limpio, sin método, host ni comodines: coincide exacto o, si acaba en `/`,
   con todo lo que cuelga de él (gana el más largo). Atiende cualquier método.
 - Sigue la misma regla que los endpoints de serie: atlas compara el path delante de tu app, que
-  recibe todo lo demás intacto. No se pueden usar `/`, los cuatro paths de serie ni repetir un
+  recibe todo lo demás intacto. No se pueden usar `/`, los cinco paths de serie ni repetir un
   patrón.
 - En el servidor compartido esos endpoints quedan en el puerto público; para pprof usa
   `WithAdminAddr`.
@@ -223,20 +334,25 @@ esperar, espéralas en un `WithShutdownHook`.
 
 - **Métricas**: atlas crea un `MeterProvider` del SDK con el exportador Prometheus sobre un
   registro privado que además incluye los colectores de Go y de proceso. `/metrics` sirve ese
-  registro: `http_server_request_duration_seconds` (con `http_route` si tu router es un
-  `http.ServeMux`), `go_*`, `process_*` y todo lo que se mida con el provider.
+  registro: `http_server_request_duration_seconds` (con `http_route` si usas `App` o un
+  `http.ServeMux`; no con chi o Gin), `go_*`, `process_*` y todo lo que se mida con el provider.
 - **Trazas**: si defines `OTEL_EXPORTER_OTLP_ENDPOINT` (o `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`),
   atlas crea un `TracerProvider` con exportador OTLP/HTTP y procesador batch. El resto de la
   configuración sale de las variables estándar (`OTEL_EXPORTER_OTLP_HEADERS`,
   `OTEL_TRACES_SAMPLER`...). Sin esas variables no se exporta nada, pero el contexto de traza
-  entrante (`traceparent`) se propaga igual y su `trace_id` aparece en el access log.
+  entrante (`traceparent`) se propaga igual y su `trace_id` aparece en los logs. Con `App` o
+  `http.ServeMux` los spans se llaman como la ruta (`GET /orders/{id}`); si no, solo con el método.
+- **Logs**: JSON por stdout, o el logger de `WithLogger`. Todo lo que se loguee con el contexto de la
+  petición lleva `request_id` y `trace_id`, también en tus handlers con
+  `slog.InfoContext(r.Context(), ...)`, sin importar atlas.
 - **Propagación**: W3C Trace Context + Baggage.
 - **Providers propios**: `WithMeterProvider` y `WithTracerProvider` sustituyen a los de atlas, que
   entonces no los cierra al apagar. Con un `MeterProvider` propio, `/metrics` solo muestra las
   métricas de Go y de proceso (y las de `WithPrometheusGatherer`).
 - **Globales**: salvo `WithoutGlobalTelemetry`, atlas registra como globales de OpenTelemetry el
   `MeterProvider`, el `TracerProvider` (solo si hay uno real), el propagador y un error handler
-  que escribe en el logger.
+  que escribe en el logger. También pone su logger como `slog.Default()`, sustituyendo uno que
+  hubieras puesto antes; para conservarlo, pásalo con `WithLogger(slog.Default())`.
 
 Las globales son el punto de encuentro con otros SDKs del mismo proceso. `hermes`, el cliente HTTP
 de olympus-core, usa por defecto `otel.GetMeterProvider()`, `otel.GetTracerProvider()` y el propagador
@@ -246,7 +362,7 @@ módulos dependa del otro.
 
 ## Con Gin o chi
 
-Cualquier `http.Handler` sirve. Con Gin, crea el engine con `gin.New()` (atlas ya pone recovery y
+Con `atlas.Run`, cualquier `http.Handler` sirve. Con Gin, crea el engine con `gin.New()` (atlas ya pone recovery y
 access log) y pásalo tal cual:
 
 ```go

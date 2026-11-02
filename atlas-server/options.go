@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,7 +24,7 @@ const (
 	kubernetesDrainDelay   = 5 * time.Second
 )
 
-// Option configures Run.
+// Option configures Run and New.
 type Option func(*config)
 
 type config struct {
@@ -44,6 +46,8 @@ type config struct {
 	tracerProvider  trace.TracerProvider
 	globalTelemetry bool
 	accessLog       bool
+	errorHandler    func(http.ResponseWriter, *http.Request, error)
+	routes          []route
 }
 
 type namedFunc struct {
@@ -65,10 +69,12 @@ func newConfig(opts []Option) config {
 		shutdownTimeout: defaultShutdownTimeout,
 		globalTelemetry: true,
 		accessLog:       true,
+		errorHandler:    writeProblem,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	cfg.logger = slog.New(contextHandler{cfg.logger.Handler()})
 	return cfg
 }
 
@@ -105,10 +111,31 @@ func (c *config) validate() error {
 			errs = append(errs, errors.New("prometheus gatherer is nil"))
 		}
 	}
+	errs = append(errs, c.routeConflicts()...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	return nil
+}
+
+// routeConflicts finds routes the ops endpoints would silently shadow on a shared server.
+func (c *config) routeConflicts() []error {
+	if c.adminAddr != "" || c.adminListener != nil {
+		return nil
+	}
+	var errs []error
+	for _, rt := range c.routes {
+		probe := rt.method == "" || rt.method == http.MethodGet || rt.method == http.MethodHead
+		if probe && slices.Contains(opsPaths, rt.path) {
+			errs = append(errs, fmt.Errorf("route %q clashes with the ops endpoint; rename it or use WithAdminAddr", rt.path))
+		}
+		for _, oh := range c.opsHandlers {
+			if oh.pattern == rt.path || (strings.HasSuffix(oh.pattern, "/") && strings.HasPrefix(rt.path, oh.pattern)) {
+				errs = append(errs, fmt.Errorf("route %q clashes with ops handler %q", rt.path, oh.pattern))
+			}
+		}
+	}
+	return errs
 }
 
 func validateNamed(kind, name string, isNil bool) error {
@@ -155,7 +182,7 @@ func WithAdminListener(ln net.Listener) Option {
 	return func(c *config) { c.adminListener = ln }
 }
 
-// WithLogger sets the logger for lifecycle, access and panic logs; nil keeps the JSON stdout default.
+// WithLogger sets the logger for lifecycle, access and panic logs, which also gets each request's IDs; nil keeps the JSON stdout default.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *config) {
 		if logger != nil {
@@ -221,9 +248,18 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(c *config) { c.tracerProvider = tp }
 }
 
-// WithoutGlobalTelemetry stops Run from setting the global OpenTelemetry providers and propagator.
+// WithoutGlobalTelemetry stops Run from setting the global OpenTelemetry providers and propagator and slog's default logger.
 func WithoutGlobalTelemetry() Option {
 	return func(c *config) { c.globalTelemetry = false }
+}
+
+// WithErrorHandler replaces how an App writes a handler's error, a 404 or a 405, by default an RFC 9457 JSON body; nil keeps the default.
+func WithErrorHandler(write func(w http.ResponseWriter, r *http.Request, err error)) Option {
+	return func(c *config) {
+		if write != nil {
+			c.errorHandler = write
+		}
+	}
 }
 
 // WithoutAccessLog disables the per-request log line.

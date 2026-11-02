@@ -106,6 +106,10 @@ func (t *telemetry) setGlobals(logger *slog.Logger) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		logger.Error("opentelemetry", "err", err)
 	}))
+	// SetDefault points package log at the new handler, so one writing through package log would deadlock.
+	if h, ok := logger.Handler().(contextHandler); !ok || !h.writesThroughLog() {
+		slog.SetDefault(logger)
+	}
 }
 
 func (t *telemetry) instrument(next http.Handler) http.Handler {
