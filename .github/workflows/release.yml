@@ -1,11 +1,11 @@
 name: release
 
-# A tag <module>/vX.Y.Z (e.g. atlas/v0.1.0) releases only that module.
+# A tag <module>/vX.Y.Z (e.g. atlas-server/v0.3.0) releases only that module.
 on:
   push:
     tags:
-      - "atlas/v*"
-      - "hermes/v*"
+      - "atlas-server/v*"
+      - "hermes-http/v*"
 
 permissions:
   contents: write

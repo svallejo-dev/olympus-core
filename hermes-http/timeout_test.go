@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus-core/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
 func TestAttemptTimeoutIsRetried(t *testing.T) {

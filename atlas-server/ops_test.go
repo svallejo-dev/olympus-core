@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"github.com/svallejo-dev/olympus-core/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas-server"
 )
 
 // rawGet sends target as is, so neither the client nor the test can clean the path first.

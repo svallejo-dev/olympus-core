@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svallejo-dev/olympus-core/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas-server"
 )
 
 func TestBackgroundWorkerStopsAfterDrainDelay(t *testing.T) {

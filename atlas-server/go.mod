@@ -1,4 +1,4 @@
-module github.com/svallejo-dev/olympus-core/atlas
+module github.com/svallejo-dev/olympus-core/atlas-server
 
 go 1.26.0
 

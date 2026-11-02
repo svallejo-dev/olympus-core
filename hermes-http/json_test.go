@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/svallejo-dev/olympus-core/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
 type order struct {

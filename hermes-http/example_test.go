@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/svallejo-dev/olympus-core/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
 func ExampleGetJSON() {

@@ -9,7 +9,7 @@ Es un SDK independiente del monorepo `olympus-core`: no importa `atlas` ni ning�
 ## Instalación
 
 ```sh
-go get github.com/svallejo-dev/olympus-core/hermes@latest
+go get github.com/svallejo-dev/olympus-core/hermes-http@latest
 ```
 
 El repositorio es privado, así que Go necesita saltarse el proxy público y tener acceso por git:

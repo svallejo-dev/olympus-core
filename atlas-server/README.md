@@ -16,7 +16,7 @@ No impone framework: todo lo que añade son middlewares estándar alrededor de t
 ## Instalación
 
 ```sh
-go get github.com/svallejo-dev/olympus-core/atlas@latest
+go get github.com/svallejo-dev/olympus-core/atlas-server@latest
 ```
 
 El repositorio es privado. Indica a Go que no use el proxy público y da acceso a git por SSH o
@@ -41,7 +41,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/svallejo-dev/olympus-core/atlas"
+	"github.com/svallejo-dev/olympus-core/atlas-server"
 )
 
 func main() {

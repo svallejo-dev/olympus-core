@@ -11,7 +11,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-const instrumentationName = "github.com/svallejo-dev/olympus-core/hermes"
+const instrumentationName = "github.com/svallejo-dev/olympus-core/hermes-http"
 
 const retryReasonKey = attribute.Key("hermes.retry.reason")
 

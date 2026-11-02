@@ -7,8 +7,8 @@ cero ceremonia, pero exclusivo para Go.
 
 | SDK | Para qué | Instalar |
 |---|---|---|
-| [`atlas`](atlas) | Arranca la app como API (`:8080`), con `/health`, `/ping`, `/liveness`, `/readiness`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas@latest` |
-| [`hermes`](hermes) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus-core/hermes@latest` |
+| [`atlas-server`](atlas-server) | Arranca la app como API (`:8080`), con `/health`, `/ping`, `/liveness`, `/readiness`, `/metrics`, recuperación de panics, access log, OpenTelemetry y apagado ordenado | `go get github.com/svallejo-dev/olympus-core/atlas-server@latest` |
+| [`hermes-http`](hermes-http) | Llama a otras APIs con circuit breaker, reintentos con backoff y jitter, timeouts, bulkhead, rate limit y OpenTelemetry | `go get github.com/svallejo-dev/olympus-core/hermes-http@latest` |
 
 Atlas sostiene tu app; hermes lleva sus mensajes a otras APIs. Los próximos SDKs seguirán
 con figuras del Olimpo que cualquiera reconoce.
@@ -32,7 +32,7 @@ con figuras del Olimpo que cualquiera reconoce.
 ```sh
 go env -w GOPRIVATE=github.com/svallejo-dev/*
 git config --global url."git@github.com:".insteadOf "https://github.com/"   # o un token HTTPS
-go get github.com/svallejo-dev/olympus-core/atlas@latest
+go get github.com/svallejo-dev/olympus-core/atlas-server@latest
 ```
 
 ## Versiones
@@ -41,17 +41,17 @@ Cada SDK se versiona por separado con tags por carpeta, la convención de Go par
 subdirectorios:
 
 ```sh
-git tag -a atlas/v0.2.0 -m "atlas v0.2.0" && git push origin atlas/v0.2.0
+git tag -a atlas-server/v0.4.0 -m "atlas-server v0.4.0" && git push origin atlas-server/v0.4.0
 ```
 
 El workflow `release` corre los tests de ese módulo y publica un GitHub Release con los
-commits que tocaron su carpeta. `go get .../atlas@v0.2.0` resuelve ese tag.
+commits que tocaron su carpeta. `go get .../atlas-server@v0.4.0` resuelve ese tag.
 
 ## Desarrollo
 
 ```sh
 go work sync                                   # go.work une los módulos en local
-cd atlas && GOWORK=off go test -race ./...      # cada SDK se prueba solo, como lo instala un usuario
+cd atlas-server && GOWORK=off go test -race ./...      # cada SDK se prueba solo, como lo instala un usuario
 golangci-lint run --config=../.golangci.yml ./...
 ./scripts/check-independence.sh
 go run ./examples/orders-api                   # atlas + hermes juntos

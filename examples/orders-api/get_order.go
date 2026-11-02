@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/svallejo-dev/olympus-core/hermes"
+	"github.com/svallejo-dev/olympus-core/hermes-http"
 )
 
 type product struct {

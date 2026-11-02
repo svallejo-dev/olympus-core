@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [atlas, hermes]
+        module: [atlas-server, hermes-http]
     env:
       # Each SDK is tested against its own go.mod, exactly as a consumer installs it.
       GOWORK: "off"
