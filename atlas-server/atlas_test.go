@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,52 +234,114 @@ func TestReadinessChecks(t *testing.T) {
 		name       string
 		check      atlas.Check
 		wantStatus int
-		wantReady  healthReport
-		wantHealth healthReport
+		want       healthReport
+		wantAdmin  healthReport
 	}{
 		{
 			name:       "passing",
 			check:      func(context.Context) error { return nil },
 			wantStatus: http.StatusOK,
-			wantReady:  healthReport{Status: "ok", Checks: map[string]string{"db": "ok", "cache": "ok"}},
-			wantHealth: healthReport{Status: "ok", Checks: map[string]string{"db": "ok", "cache": "ok"}},
+			want:       healthReport{Status: "ok", Checks: map[string]string{"db": "ok", "cache": "ok"}},
+			wantAdmin:  healthReport{Status: "ok", Checks: map[string]string{"db": "ok", "cache": "ok"}},
 		},
 		{
 			name:       "failing",
 			check:      func(context.Context) error { return errors.New("dial tcp 10.0.0.7:5432: connection refused") },
 			wantStatus: http.StatusServiceUnavailable,
-			wantReady:  healthReport{Status: "unavailable", Checks: map[string]string{"db": "fail", "cache": "ok"}},
-			wantHealth: healthReport{Status: "unavailable", Checks: map[string]string{"db": "error: dial tcp 10.0.0.7:5432: connection refused", "cache": "ok"}},
+			want:       healthReport{Status: "unavailable", Checks: map[string]string{"db": "fail", "cache": "ok"}},
+			wantAdmin:  healthReport{Status: "unavailable", Checks: map[string]string{"db": "error: dial tcp 10.0.0.7:5432: connection refused", "cache": "ok"}},
 		},
 		{
 			name:       "panicking",
 			check:      func(context.Context) error { panic("nil pool") },
 			wantStatus: http.StatusServiceUnavailable,
-			wantReady:  healthReport{Status: "unavailable", Checks: map[string]string{"db": "fail", "cache": "ok"}},
-			wantHealth: healthReport{Status: "unavailable", Checks: map[string]string{"db": "error: panic: nil pool", "cache": "ok"}},
+			want:       healthReport{Status: "unavailable", Checks: map[string]string{"db": "fail", "cache": "ok"}},
+			wantAdmin:  healthReport{Status: "unavailable", Checks: map[string]string{"db": "error: panic: nil pool", "cache": "ok"}},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			svc := start(t, helloMux(),
+			checks := []atlas.Option{
 				atlas.WithReadinessCheck("db", tt.check),
 				atlas.WithReadinessCheck("cache", func(context.Context) error { return nil }),
-			)
-			for path, want := range map[string]healthReport{"/readiness": tt.wantReady, "/health": tt.wantHealth} {
-				got := get(t, svc.url+path)
+			}
+			assertReport := func(url string, want healthReport) {
+				t.Helper()
+				got := get(t, url)
 				if got.status != tt.wantStatus {
-					t.Errorf("GET %s = %d, want %d", path, got.status, tt.wantStatus)
+					t.Errorf("GET %s = %d, want %d", url, got.status, tt.wantStatus)
 				}
 				if ct := got.header.Get("Content-Type"); ct != "application/json" {
-					t.Errorf("GET %s Content-Type = %q, want application/json", path, ct)
+					t.Errorf("GET %s Content-Type = %q, want application/json", url, ct)
 				}
 				rep := decodeReport(t, got.body)
 				if rep.Status != want.Status || !maps.Equal(rep.Checks, want.Checks) {
-					t.Errorf("GET %s report = %+v, want %+v", path, rep, want)
+					t.Errorf("GET %s report = %+v, want %+v", url, rep, want)
 				}
 			}
+
+			shared := start(t, helloMux(), checks...)
+			assertReport(shared.url+"/readiness", tt.want)
+			assertReport(shared.url+"/health", tt.want)
+
+			adminLn := listenLocal(t)
+			adminURL := "http://" + adminLn.Addr().String()
+			start(t, helloMux(), append(checks, atlas.WithAdminListener(adminLn))...)
+			assertReport(adminURL+"/readiness", tt.want)
+			assertReport(adminURL+"/health", tt.wantAdmin)
 		})
+	}
+}
+
+func TestCheckTransitionsAreLogged(t *testing.T) {
+	t.Parallel()
+	var failure atomic.Pointer[error]
+	boom := errors.New("dial tcp 10.0.0.7:5432: connection refused")
+	svc := start(t, helloMux(), atlas.WithReadinessCheck("db", func(context.Context) error {
+		if err := failure.Load(); err != nil {
+			return *err
+		}
+		return nil
+	}))
+	probe := func(times int) {
+		for range times {
+			get(t, svc.url+"/health")
+			get(t, svc.url+"/readiness")
+		}
+	}
+
+	probe(2)
+	if got := svc.logs.records(t, "readiness check failing"); len(got) != 0 {
+		t.Errorf("logged a failure while healthy: %v", got)
+	}
+	failure.Store(&boom)
+	probe(3)
+	failing := svc.logs.records(t, "readiness check failing")
+	if len(failing) != 1 || failing[0]["check"] != "db" || failing[0]["err"] != boom.Error() {
+		t.Errorf("failing logs = %v, want one with the error", failing)
+	}
+	failure.Store(nil)
+	probe(3)
+	if got := svc.logs.records(t, "readiness check recovered"); len(got) != 1 || got[0]["check"] != "db" {
+		t.Errorf("recovered logs = %v, want one", got)
+	}
+	failure.Store(&boom)
+	probe(1)
+	if got := svc.logs.records(t, "readiness check failing"); len(got) != 2 {
+		t.Errorf("failing logs after a second failure = %d, want 2", len(got))
+	}
+}
+
+func TestHealthErrorMessageStaysOffThePublicPort(t *testing.T) {
+	t.Parallel()
+	svc := start(t, helloMux(), atlas.WithReadinessCheck("db", func(context.Context) error {
+		return errors.New("dial tcp 10.0.0.7:5432: connection refused")
+	}))
+	for _, path := range []string{"/health", "/readiness"} {
+		if got := get(t, svc.url+path); strings.Contains(got.body, "10.0.0.7") {
+			t.Errorf("GET %s leaks the error: %s", path, got.body)
+		}
 	}
 }
 

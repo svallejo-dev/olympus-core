@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ type check struct {
 
 	mu       sync.Mutex
 	inflight *checkRun
+	failing  atomic.Bool
 }
 
 // checkRun is one execution of a check, shared by every probe that arrives while it runs.
@@ -46,9 +48,15 @@ type report struct {
 }
 
 type health struct {
-	ready  atomic.Bool
-	checks []*check
+	ready      atomic.Bool
+	checks     []*check
+	logger     *slog.Logger
+	showErrors bool
 }
+
+func hideError(error) string { return "fail" }
+
+func showError(err error) string { return "error: " + err.Error() }
 
 func ping(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -66,11 +74,16 @@ func (h *health) readiness(w http.ResponseWriter, r *http.Request) {
 		writeReport(w, report{Status: statusUnavailable})
 		return
 	}
-	writeReport(w, h.run(r.Context(), func(error) string { return "fail" }))
+	writeReport(w, h.run(r.Context(), hideError))
 }
 
+// detailed shows error messages only on a separate admin server; on the app's port they would reach the internet with their internal addresses.
 func (h *health) detailed(w http.ResponseWriter, r *http.Request) {
-	writeReport(w, h.run(r.Context(), func(err error) string { return "error: " + err.Error() }))
+	describe := hideError
+	if h.showErrors {
+		describe = showError
+	}
+	writeReport(w, h.run(r.Context(), describe))
 }
 
 func (h *health) run(ctx context.Context, describe func(error) string) report {
@@ -83,6 +96,7 @@ func (h *health) run(ctx context.Context, describe func(error) string) report {
 
 	rep := report{Status: statusOK, Checks: make(map[string]string, len(h.checks))}
 	for i, c := range h.checks {
+		h.logTransition(ctx, c, errs[i])
 		if errs[i] != nil {
 			rep.Status = statusUnavailable
 			rep.Checks[c.name] = describe(errs[i])
@@ -91,6 +105,23 @@ func (h *health) run(ctx context.Context, describe func(error) string) report {
 		rep.Checks[c.name] = statusOK
 	}
 	return rep
+}
+
+// logTransition is where a check's error can be seen without an admin server; only changes are logged, because probes repeat every few seconds.
+func (h *health) logTransition(ctx context.Context, c *check, err error) {
+	if ctx.Err() != nil {
+		// The probe went away, which says nothing about the dependency.
+		return
+	}
+	failing := err != nil
+	if c.failing.Swap(failing) == failing {
+		return
+	}
+	if failing {
+		h.logger.WarnContext(ctx, "readiness check failing", "check", c.name, "err", err.Error())
+		return
+	}
+	h.logger.InfoContext(ctx, "readiness check recovered", "check", c.name)
 }
 
 // run joins the execution in progress instead of starting another, so a check that ignores ctx

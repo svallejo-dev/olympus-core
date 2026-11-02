@@ -57,7 +57,7 @@ func newService(ctx context.Context, handler http.Handler, cfg config) (*service
 		return nil, err
 	}
 
-	h := &health{checks: cfg.checks}
+	h := &health{checks: cfg.checks, logger: cfg.logger, showErrors: adminLn != nil}
 	app := appHandler(handler, tel, &cfg)
 	svc := &service{cfg: cfg, health: h, tel: tel}
 	if adminLn == nil {

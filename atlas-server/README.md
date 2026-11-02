@@ -196,19 +196,24 @@ con nombre repetido, nombres vacíos, checks, hooks, trabajos o handlers `nil`, 
 
 | Ruta | Responde | Uso |
 |---|---|---|
-| `GET /health` | el informe detallado de los checks (`200` o `503`), sin mirar si el servicio está drenando | diagnóstico, dashboards |
+| `GET /health` | el estado de cada check (`200` o `503`), sin mirar si el servicio está drenando; el mensaje de error solo con `WithAdminAddr` | diagnóstico, dashboards |
 | `GET /ping` | `200 pong`, sin mirar nada más | comprobar a mano o desde un balanceador que el servicio responde |
 | `GET /liveness` | `200 {"status":"ok"}` mientras el proceso vive | liveness probe |
 | `GET /readiness` | `503` antes de empezar a servir y durante el apagado; si no, ejecuta los checks: `200` o `503` con `ok`/`fail` por check | readiness probe / balanceador |
 | `GET /metrics` | métricas en formato Prometheus | scraping |
 
-`/readiness` solo dice qué check falla; `/health` añade el mensaje de error, que puede llevar
-direcciones internas o detalles de la conexión:
+En el puerto de la app, `/readiness` y `/health` solo dicen qué check falla, porque el mensaje de error
+puede llevar direcciones internas o detalles de la conexión. Con `WithAdminAddr`, que se supone interno,
+`/health` añade ese mensaje:
 
 ```json
 {"status":"unavailable","checks":{"postgres":"fail","cache":"ok"}}
 {"status":"unavailable","checks":{"postgres":"error: dial tcp 10.0.3.7:5432: connection refused","cache":"ok"}}
 ```
+
+En cualquier caso, el error queda en el log: `readiness check failing` en `WARN` con `check` y `err` cuando un
+check empieza a fallar, y `readiness check recovered` en `INFO` cuando se recupera. Solo se registra el
+cambio de estado, no cada sonda, y solo cuando alguna sonda ejecuta el check.
 
 - Los checks se ejecutan en paralelo, cada uno con un timeout de 2 s; un panic en un check cuenta
   como error. Si un check ignora el contexto y sigue en marcha tras el timeout, las sondas
@@ -224,7 +229,8 @@ direcciones internas o detalles de la conexión:
   tu ruta. La comparación es por path literal: una ruta con comodín como `/{slug}` puede convivir con
   ellos, y `/health` lo atiende atlas. Con `atlas.Run` y tu propio router no se puede detectar, y gana atlas.
 - Con `WithAdminAddr(":9090")` estos endpoints se sirven **solo** en ese puerto y tu handler queda
-  solo en el principal. Úsalo si no quieres exponer `/metrics` ni `/health` al exterior.
+  solo en el principal. Úsalo si no quieres exponer `/metrics` al exterior, o para ver en `/health` el
+  mensaje de cada error.
 
 ### Ampliar el servidor de operación
 

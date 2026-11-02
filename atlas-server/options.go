@@ -193,7 +193,7 @@ func WithAddr(addr string) Option {
 	return func(c *config) { c.addr = addr }
 }
 
-// WithAdminAddr serves the ops endpoints on a separate server at addr instead of the app server.
+// WithAdminAddr serves the ops endpoints on a separate server at addr instead of the app server; only there does /health show error messages.
 func WithAdminAddr(addr string) Option {
 	return func(c *config) { c.adminAddr = addr }
 }
@@ -203,7 +203,7 @@ func WithListener(ln net.Listener) Option {
 	return func(c *config) { c.listener = ln }
 }
 
-// WithAdminListener serves the ops endpoints on ln, on a separate server; Run closes ln.
+// WithAdminListener serves the ops endpoints on ln, on a separate server where /health shows error messages; Run closes ln.
 func WithAdminListener(ln net.Listener) Option {
 	return func(c *config) { c.adminListener = ln }
 }
