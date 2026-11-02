@@ -16,7 +16,8 @@ for modfile in "$root"/*/go.mod; do
     echo "error: $name/go.mod depends on another olympus-core module" >&2
     status=1
   fi
-  if grep -rn --include='*.go' "\"$prefix/" "$dir" | grep -v "\"$self[/\"]"; then
+  # Import lines only: a string constant may mention the module's own path.
+  if grep -rnE --include='*.go' "^[[:space:]]*(import[[:space:]]+)?([[:alnum:]_.]+[[:space:]]+)?\"$prefix/" "$dir" | grep -v "\"$self[/\"]"; then
     echo "error: $name imports another olympus-core module" >&2
     status=1
   fi

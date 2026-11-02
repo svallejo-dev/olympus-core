@@ -23,7 +23,8 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	if t.token != nil && out.Header.Get("Authorization") == "" {
-		token, err := t.token(req.Context())
+		// The token call is a request of its own, so it must not inherit this one's Idempotent mark.
+		token, err := t.token(context.WithValue(req.Context(), idempotentKey{}, nil))
 		if err != nil {
 			closeRequestBody(req)
 			return nil, &tokenError{err: err}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -125,18 +126,9 @@ func TestTraceContextIsInjectedOncePerCall(t *testing.T) {
 	}
 }
 
-func TestErrorTypeNamesTheFailure(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	srv := newServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
-	c := newClient(t, srv.URL, hermes.WithMeterProvider(mp), hermes.WithoutRetry(),
-		hermes.WithCircuitBreaker(hermes.BreakerPolicy{ConsecutiveFailures: 1}))
-
-	_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
-	if _, err := hermes.GetJSON[struct{}](t.Context(), c, "/"); !errors.Is(err, hermes.ErrCircuitOpen) {
-		t.Fatalf("err = %v, want ErrCircuitOpen", err)
-	}
-
+// errorTypes collects the error.type values recorded on the client duration metric.
+func errorTypes(t *testing.T, reader sdkmetric.Reader) []string {
+	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(t.Context(), &rm); err != nil {
 		t.Fatal(err)
@@ -155,8 +147,71 @@ func TestErrorTypeNamesTheFailure(t *testing.T) {
 			}
 		}
 	}
-	const want = "github.com/svallejo-dev/olympus-core/hermes-http.circuitOpenError"
-	if !slices.Contains(got, want) {
-		t.Errorf("error.type values = %q, want %q among them", got, want)
+	return got
+}
+
+func TestErrorTypeNamesTheFailure(t *testing.T) {
+	const pkg = "github.com/svallejo-dev/olympus-core/hermes-http."
+	block := func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
+	fail := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }
+	retryLater := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	shortly := func(t *testing.T) context.Context {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		opts    []hermes.Option
+		call    func(t *testing.T, c *hermes.Client)
+		want    string
+	}{
+		{"open breaker", fail, []hermes.Option{hermes.WithoutRetry(), hermes.WithCircuitBreaker(hermes.BreakerPolicy{ConsecutiveFailures: 1})},
+			func(t *testing.T, c *hermes.Client) {
+				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
+				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
+			}, "circuitOpenError"},
+		{"attempt timeout", block, []hermes.Option{hermes.WithoutRetry(), hermes.WithAttemptTimeout(20 * time.Millisecond)},
+			func(t *testing.T, c *hermes.Client) { _, _ = hermes.GetJSON[struct{}](t.Context(), c, "/") }, "attemptTimeoutError"},
+		{"rate limit", fail, []hermes.Option{hermes.WithoutRetry(), hermes.WithRateLimit(0.001, 1)},
+			func(t *testing.T, c *hermes.Client) {
+				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
+				_, _ = hermes.GetJSON[struct{}](shortly(t), c, "/")
+			}, "rateLimitError"},
+		{"concurrency slot", block, []hermes.Option{hermes.WithoutRetry(), hermes.WithMaxConcurrent(1)},
+			func(t *testing.T, c *hermes.Client) {
+				holder, release := context.WithCancel(t.Context())
+				var wg sync.WaitGroup
+				wg.Go(func() { _, _ = hermes.GetJSON[struct{}](holder, c, "/") })
+				time.Sleep(50 * time.Millisecond)
+				_, _ = hermes.GetJSON[struct{}](shortly(t), c, "/")
+				release()
+				wg.Wait()
+			}, "concurrencyError"},
+		{"retry wait", retryLater, nil,
+			func(t *testing.T, c *hermes.Client) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				time.AfterFunc(100*time.Millisecond, cancel)
+				_, _ = hermes.GetJSON[struct{}](ctx, c, "/")
+			}, "retryWaitError"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			c := newClient(t, newServer(t, tt.handler).URL, append(tt.opts, hermes.WithMeterProvider(mp))...)
+
+			tt.call(t, c)
+
+			if got := errorTypes(t, reader); !slices.Contains(got, pkg+tt.want) {
+				t.Errorf("error.type values = %q, want %q among them", got, pkg+tt.want)
+			}
+		})
 	}
 }

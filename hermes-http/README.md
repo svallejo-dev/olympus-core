@@ -1,4 +1,4 @@
-# hermes
+# hermes-http
 
 Cliente HTTP para llamar a otras APIs con la resiliencia ya resuelta por configuración:
 reintentos con backoff exponencial y jitter, timeouts por intento y totales, circuit breaker

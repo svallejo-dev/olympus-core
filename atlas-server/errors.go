@@ -1,6 +1,7 @@
 package atlas
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,10 +13,11 @@ import (
 // statusClientClosedRequest is the de facto status for a client that left before the response.
 const statusClientClosedRequest = 499
 
-// statusCoder is what a handler's error implements to choose its status, without importing atlas.
-type statusCoder interface {
+// httpStatuser is what a handler's error implements to choose its status, without importing atlas.
+// It is not StatusCode because many SDK errors have that method, and a backend's status and message must not reach the client by accident.
+type httpStatuser interface {
 	error
-	StatusCode() int
+	HTTPStatus() int
 }
 
 type statusError struct {
@@ -25,17 +27,18 @@ type statusError struct {
 
 func (e *statusError) Error() string   { return e.err.Error() }
 func (e *statusError) Unwrap() error   { return e.err }
-func (e *statusError) StatusCode() int { return e.status }
+func (e *statusError) HTTPStatus() int { return e.status }
 
 // Errorf returns an error with an HTTP status; below 500 its message reaches the client, so it must not carry internals.
 func Errorf(status int, format string, args ...any) error {
 	return &statusError{status: status, err: fmt.Errorf(format, args...)}
 }
 
-func statusOf(err error) int {
-	if coder, ok := errors.AsType[statusCoder](err); ok {
-		if code := coder.StatusCode(); code >= http.StatusBadRequest && code <= 599 {
-			return code
+// StatusOf returns the status an App answers err with: that of the first error in the chain with an HTTPStatus method between 400 and 599, otherwise 500.
+func StatusOf(err error) int {
+	if e, ok := errors.AsType[httpStatuser](err); ok {
+		if status := e.HTTPStatus(); status >= http.StatusBadRequest && status <= 599 {
+			return status
 		}
 	}
 	return http.StatusInternalServerError
@@ -59,7 +62,7 @@ func (t *routeTable) fail(w *responseRecorder, r *http.Request, err error) {
 		return
 	}
 	started := w.status != 0
-	if started || statusOf(err) >= http.StatusInternalServerError {
+	if started || StatusOf(err) >= http.StatusInternalServerError {
 		t.logger.LogAttrs(ctx, slog.LevelError, "request failed",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
@@ -70,7 +73,15 @@ func (t *routeTable) fail(w *responseRecorder, r *http.Request, err error) {
 		// Headers are gone; aborting makes the client see a broken response, not a truncated one that looks complete.
 		panic(http.ErrAbortHandler)
 	}
+	dropEntityHeaders(w.Header())
 	t.writeError(w, r, err)
+}
+
+// dropEntityHeaders removes what a handler set for the response it no longer sends, as http.ServeContent does on errors.
+func dropEntityHeaders(h http.Header) {
+	for _, name := range []string{"Cache-Control", "Content-Encoding", "Content-Length", "ETag", "Last-Modified"} {
+		h.Del(name)
+	}
 }
 
 // problem is an RFC 9457 error body.
@@ -83,13 +94,12 @@ type problem struct {
 }
 
 func writeProblem(w http.ResponseWriter, r *http.Request, err error) {
-	status := statusOf(err)
-	p := problem{Type: "about:blank", Title: http.StatusText(status), Status: status, RequestID: RequestID(r.Context())}
-	if coder, ok := errors.AsType[statusCoder](err); ok && status < http.StatusInternalServerError {
-		p.Detail = coder.Error()
+	status := StatusOf(err)
+	p := problem{Type: "about:blank", Title: cmp.Or(http.StatusText(status), "Error"), Status: status, RequestID: RequestID(r.Context())}
+	if e, ok := errors.AsType[httpStatuser](err); ok && status < http.StatusInternalServerError {
+		p.Detail = e.Error()
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
-	w.Header().Del("Content-Length")
 	w.WriteHeader(status)
 	// A failed write means the client went away; there is nobody left to tell.
 	_ = json.NewEncoder(w).Encode(p)

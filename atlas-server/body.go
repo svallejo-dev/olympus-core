@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -25,7 +26,7 @@ func JSON(w http.ResponseWriter, status int, v any) error {
 	return nil
 }
 
-// Decode reads a JSON request body of up to 1 MiB into a T; its errors carry a 400, 413 or 415 status.
+// Decode reads a JSON request body of up to 1 MiB into a T, ignoring unknown fields; its errors carry a 4xx status, or a 500 when reading the body fails.
 func Decode[T any](w http.ResponseWriter, r *http.Request) (T, error) {
 	return DecodeLimit[T](w, r, defaultMaxBodyBytes)
 }
@@ -36,35 +37,58 @@ func DecodeLimit[T any](w http.ResponseWriter, r *http.Request, limit int64) (T,
 	if !isJSON(r.Header.Get("Content-Type")) {
 		return zero, Errorf(http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 	}
+	if r.Body == nil {
+		return zero, Errorf(http.StatusBadRequest, "request body is empty")
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	if err := dec.Decode(&v); err != nil {
-		return zero, decodeError(err)
+		return zero, decodeError(r, err)
 	}
 	err := dec.Decode(&struct{}{})
-	if errors.Is(err, io.EOF) {
+	switch {
+	case errors.Is(err, io.EOF):
 		return v, nil
+	case isReadFailure(err):
+		return zero, decodeError(r, err)
+	default:
+		return zero, Errorf(http.StatusBadRequest, "request body must contain a single JSON value")
 	}
-	if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
-		return zero, decodeError(err)
-	}
-	return zero, Errorf(http.StatusBadRequest, "request body must contain a single JSON value")
 }
 
-// isJSON accepts a missing Content-Type, which is what many HTTP clients send by default.
+// isJSON rejects a missing Content-Type too: a cross-site POST of an untyped blob skips the CORS preflight.
 func isJSON(contentType string) bool {
-	if contentType == "" {
-		return true
-	}
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	return err == nil && (mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"))
 }
 
-func decodeError(err error) error {
+func isReadFailure(err error) bool {
+	_, tooLarge := errors.AsType[*http.MaxBytesError](err)
+	_, network := errors.AsType[net.Error](err)
+	return tooLarge || network
+}
+
+// decodeError never passes on the decoder's own message: it can carry Go type names and network addresses.
+func decodeError(r *http.Request, err error) error {
 	if tooLarge, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		return Errorf(http.StatusRequestEntityTooLarge, "request body exceeds %d bytes", tooLarge.Limit)
+	}
+	if netErr, ok := errors.AsType[net.Error](err); ok {
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if netErr.Timeout() {
+			return Errorf(http.StatusRequestTimeout, "timed out reading the request body")
+		}
+		return fmt.Errorf("read request body: %w", err)
 	}
 	if errors.Is(err, io.EOF) {
 		return Errorf(http.StatusBadRequest, "request body is empty")
 	}
-	return Errorf(http.StatusBadRequest, "invalid JSON in request body: %w", err)
+	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok && typeErr.Field != "" {
+		return Errorf(http.StatusBadRequest, "field %q in the request body has the wrong type", typeErr.Field)
+	}
+	if e, ok := errors.AsType[httpStatuser](err); ok {
+		return e
+	}
+	return Errorf(http.StatusBadRequest, "request body is not valid JSON for this request")
 }

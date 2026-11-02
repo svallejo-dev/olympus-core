@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -85,7 +86,7 @@ func newTelemetry(ctx context.Context, cfg *config) (*telemetry, error) {
 	}
 
 	if cfg.globalTelemetry {
-		t.setGlobals(cfg.logger)
+		t.setGlobals(cfg.logger, cfg.ownLogger)
 	}
 	if t.tracerProvider == nil {
 		t.tracerProvider = otel.GetTracerProvider()
@@ -97,7 +98,7 @@ func otlpConfigured() bool {
 	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
 }
 
-func (t *telemetry) setGlobals(logger *slog.Logger) {
+func (t *telemetry) setGlobals(logger *slog.Logger, ownLogger bool) {
 	otel.SetMeterProvider(t.meterProvider)
 	if t.tracerProvider != nil {
 		otel.SetTracerProvider(t.tracerProvider)
@@ -106,18 +107,59 @@ func (t *telemetry) setGlobals(logger *slog.Logger) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		logger.Error("opentelemetry", "err", err)
 	}))
-	// SetDefault points package log at the new handler, so one writing through package log would deadlock.
-	if h, ok := logger.Handler().(contextHandler); !ok || !h.writesThroughLog() {
+	setDefaultLogger(logger, ownLogger)
+}
+
+// stdlibDefaultHandler is the type of slog's initial handler, which writes through package log.
+var stdlibDefaultHandler = reflect.TypeOf(slog.Default().Handler())
+
+// setDefaultLogger makes slog calls in handlers carry the request's IDs. A default the application
+// chose is kept and only gains the IDs. A logger from WithLogger stays out of it: SetDefault points
+// package log at the new handler, so one built on slog's initial handler would deadlock.
+func setDefaultLogger(logger *slog.Logger, ownLogger bool) {
+	current := slog.Default().Handler()
+	switch {
+	case reflect.TypeOf(current) != stdlibDefaultHandler:
+		slog.SetDefault(slog.New(withContextIDs(current)))
+	case !ownLogger:
 		slog.SetDefault(logger)
 	}
 }
 
+type abortKey struct{}
+
+// instrument holds an abort back until otelhttp has finished: it skips its metrics and span name while a panic unwinds through it.
 func (t *telemetry) instrument(next http.Handler) http.Handler {
-	return otelhttp.NewHandler(next, "http.server",
+	instrumented := otelhttp.NewHandler(catchAbort(next), "http.server",
 		otelhttp.WithMeterProvider(t.meterProvider),
 		otelhttp.WithTracerProvider(t.tracerProvider),
 		otelhttp.WithPropagators(t.propagator),
 	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aborted := new(bool)
+		instrumented.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), abortKey{}, aborted)))
+		if *aborted {
+			panic(http.ErrAbortHandler)
+		}
+	})
+}
+
+func catchAbort(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if err, ok := v.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
+				panic(v)
+			}
+			if aborted, ok := r.Context().Value(abortKey{}).(*bool); ok {
+				*aborted = true
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (t *telemetry) metricsHandler() http.Handler {

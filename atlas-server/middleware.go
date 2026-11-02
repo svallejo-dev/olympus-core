@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -37,22 +36,11 @@ func withRequestID(next http.Handler) http.Handler {
 		w.Header().Set(requestIDHeader, id)
 
 		req := r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id))
-		next.ServeHTTP(w, req)
 		// otelhttp reads the route matched by an inner ServeMux from the request it passed down.
-		r.Pattern = req.Pattern
-		nameSpan(req)
+		// Deferred so an aborted request keeps its route; {$} is routing syntax nobody should see in a metric.
+		defer func() { r.Pattern = strings.TrimSuffix(req.Pattern, "{$}") }()
+		next.ServeHTTP(w, req)
 	})
-}
-
-// nameSpan follows the OpenTelemetry convention "METHOD /route", known only once a ServeMux has matched.
-func nameSpan(r *http.Request) {
-	switch {
-	case r.Pattern == "":
-	case strings.Contains(r.Pattern, " "):
-		trace.SpanFromContext(r.Context()).SetName(r.Pattern)
-	default:
-		trace.SpanFromContext(r.Context()).SetName(r.Method + " " + r.Pattern)
-	}
 }
 
 func validRequestID(id string) bool {
@@ -122,8 +110,8 @@ func recorderFor(w http.ResponseWriter) *responseRecorder {
 }
 
 func (rec *responseRecorder) WriteHeader(code int) {
-	// 1xx responses such as 103 Early Hints are informational; the final status comes later.
-	if rec.status == 0 && code >= http.StatusOK {
+	// 1xx responses such as 103 Early Hints are informational, but 101 ends the HTTP exchange.
+	if rec.status == 0 && (code >= http.StatusOK || code == http.StatusSwitchingProtocols) {
 		rec.status = code
 	}
 	rec.ResponseWriter.WriteHeader(code)
@@ -175,6 +163,13 @@ type contextHandler struct {
 	slog.Handler
 }
 
+func withContextIDs(h slog.Handler) slog.Handler {
+	if _, ok := h.(contextHandler); ok {
+		return h
+	}
+	return contextHandler{h}
+}
+
 func (h contextHandler) Handle(ctx context.Context, record slog.Record) error {
 	record = record.Clone()
 	if id := RequestID(ctx); id != "" {
@@ -184,11 +179,6 @@ func (h contextHandler) Handle(ctx context.Context, record slog.Record) error {
 		record.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
 	}
 	return h.Handler.Handle(ctx, record)
-}
-
-// writesThroughLog reports slog's initial handler, which writes through package log.
-func (h contextHandler) writesThroughLog() bool {
-	return fmt.Sprintf("%T", h.Handler) == "*slog.defaultHandler"
 }
 
 func (h contextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

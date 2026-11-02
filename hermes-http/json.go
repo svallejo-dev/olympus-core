@@ -122,7 +122,7 @@ func GetJSON[T any](ctx context.Context, c *Client, path string, opts ...Request
 	return DoJSON[T](ctx, c, http.MethodGet, path, nil, opts...)
 }
 
-// PostJSON is DoJSON with POST; it is retried only with an IdempotencyKey or RetryPolicy.RetryNonIdempotent.
+// PostJSON is DoJSON with POST; it is retried only when known to be idempotent, see Idempotent and RetryPolicy.
 func PostJSON[T any](ctx context.Context, c *Client, path string, in any, opts ...RequestOption) (T, error) {
 	return DoJSON[T](ctx, c, http.MethodPost, path, in, opts...)
 }

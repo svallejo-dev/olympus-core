@@ -199,7 +199,7 @@ func TestUnmatchedRequestsAreProblems(t *testing.T) {
 type domainError struct{ status int }
 
 func (e domainError) Error() string   { return "domain says no" }
-func (e domainError) StatusCode() int { return e.status }
+func (e domainError) HTTPStatus() int { return e.status }
 
 func TestHandlerErrors(t *testing.T) {
 	t.Parallel()
@@ -245,6 +245,133 @@ func TestHandlerErrors(t *testing.T) {
 }
 
 func wrapErr(err error) error { return errors.Join(errors.New("context"), err) }
+
+// sdkError looks like an AWS or similar SDK error: its status belongs to another service.
+type sdkError struct{}
+
+func (sdkError) Error() string   { return "AccessDenied: arn:aws:iam::123456789:role/secret" }
+func (sdkError) StatusCode() int { return http.StatusForbidden }
+
+func TestSDKErrorStatusIsNotPropagated(t *testing.T) {
+	t.Parallel()
+	app := quietApp()
+	app.Get("/", func(http.ResponseWriter, *http.Request) error { return wrapErr(sdkError{}) })
+
+	rec := serveApp(app, "GET", "/", nil)
+	p := decodeProblem(t, rec)
+	if rec.Code != http.StatusInternalServerError || p.Detail != "" || strings.Contains(rec.Body.String(), "arn:aws") {
+		t.Errorf("response = %d %s, want a 500 without details", rec.Code, rec.Body)
+	}
+}
+
+func TestStatusOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		want int
+	}{
+		{errors.New("x"), 500},
+		{atlas.Errorf(http.StatusNotFound, "x"), 404},
+		{wrapErr(domainError{http.StatusTeapot}), 418},
+		{domainError{http.StatusOK}, 500},
+	}
+	for _, tt := range tests {
+		if got := atlas.StatusOf(tt.err); got != tt.want {
+			t.Errorf("StatusOf(%v) = %d, want %d", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestErrorDropsHeadersOfTheResponseItReplaces(t *testing.T) {
+	t.Parallel()
+	dropped := []string{"Cache-Control", "Content-Encoding", "ETag", "Last-Modified", "Content-Length"}
+	setHeaders := func(w http.ResponseWriter) {
+		for _, name := range dropped {
+			w.Header().Set(name, "1")
+		}
+		w.Header().Set("X-Kept", "yes")
+	}
+	app := quietApp()
+	app.Get("/fail", func(w http.ResponseWriter, _ *http.Request) error {
+		setHeaders(w)
+		return errors.New("boom")
+	})
+	app.Get("/panic", func(w http.ResponseWriter, _ *http.Request) error {
+		setHeaders(w)
+		panic("boom")
+	})
+	for _, target := range []string{"/fail", "/panic"} {
+		rec := serveApp(app, "GET", target, nil)
+		for _, name := range dropped {
+			if got := rec.Header().Get(name); got != "" {
+				t.Errorf("GET %s kept %s: %q", target, name, got)
+			}
+		}
+		if rec.Header().Get("X-Kept") != "yes" {
+			t.Errorf("GET %s lost an unrelated header", target)
+		}
+	}
+}
+
+func TestProblemTitleForAnUnknownStatus(t *testing.T) {
+	t.Parallel()
+	app := quietApp()
+	app.Get("/", func(http.ResponseWriter, *http.Request) error { return atlas.Errorf(420, "calm down") })
+	rec := serveApp(app, "GET", "/", nil)
+	var p problemBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || p.Title != "Error" || p.Status != 420 {
+		t.Errorf("problem = %+v, %v", p, err)
+	}
+}
+
+func TestSwitchingProtocolsThenErrorDoesNotOverwriteTheStatus(t *testing.T) {
+	t.Parallel()
+	app := quietApp()
+	app.Get("/", func(w http.ResponseWriter, _ *http.Request) error {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+		return errors.New("upgrade failed")
+	})
+	defer func() {
+		if v := recover(); v != http.ErrAbortHandler { //nolint:errorlint // recover returns the exact sentinel
+			t.Errorf("recover() = %v, want http.ErrAbortHandler", v)
+		}
+	}()
+	serveApp(app, "GET", "/", nil)
+}
+
+func TestMethodIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	app := quietApp()
+	app.Method("get", "/x", text("ok"))
+	if rec := serveApp(app, "GET", "/x", nil); rec.Body.String() != "ok" {
+		t.Errorf("GET /x = %d %q", rec.Code, rec.Body)
+	}
+}
+
+func TestHandleKeepsServeMuxMeaningOfTrailingSlash(t *testing.T) {
+	t.Parallel()
+	app := quietApp()
+	app.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.URL.Path) }))
+	if rec := serveApp(app, "GET", "/static/a.css", nil); rec.Body.String() != "/static/a.css" {
+		t.Errorf("GET /static/a.css = %d %q", rec.Code, rec.Body)
+	}
+}
+
+func TestMountWithEncodedPrefixStillMatches(t *testing.T) {
+	t.Parallel()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.URL.Path+"|"+r.URL.RawPath) })
+	app := quietApp()
+	app.Mount("/admin", inner)
+	for target, want := range map[string]string{
+		"/%61dmin/x":   "/x|",
+		"/admin/a%2Fb": "/a/b|/a%2Fb",
+		"/admin?q=1":   "/|",
+	} {
+		if rec := serveApp(app, "GET", target, nil); rec.Body.String() != want {
+			t.Errorf("GET %s = %d %q, want %q", target, rec.Code, rec.Body, want)
+		}
+	}
+}
 
 func TestHandlerErrorAfterResponseStarted(t *testing.T) {
 	t.Parallel()
@@ -359,6 +486,8 @@ func TestRegistrationPanics(t *testing.T) {
 			g.Get("/y", ok)
 			g.Use(tag("late"))
 		},
+		"nil Use":                    func(a *atlas.App) { a.Use(nil) },
+		"nil route middleware":       func(a *atlas.App) { a.Get("/x", ok, nil) },
 		"path without slash":         func(a *atlas.App) { a.Get("x", ok) },
 		"prefix without slash":       func(a *atlas.App) { a.Group("x") },
 		"prefix with trailing slash": func(a *atlas.App) { a.Group("/x/") },
@@ -458,6 +587,9 @@ func TestAppRunRejectsRoutesShadowedByOpsEndpoints(t *testing.T) {
 		{"any method", nil, func(a *atlas.App) { a.Handle("/metrics", http.NotFoundHandler()) }, `route "/metrics" clashes`},
 		{"mount", nil, func(a *atlas.App) { a.Mount("/liveness", http.NotFoundHandler()) }, `route "/liveness" clashes`},
 		{"ops subtree", []atlas.Option{pprof}, func(a *atlas.App) { a.Post("/debug/x", ok) }, `clashes with ops handler "/debug/"`},
+		{"mount over ops subtree", []atlas.Option{pprof}, func(a *atlas.App) { a.Mount("/debug", http.NotFoundHandler()) }, `clashes with ops handler "/debug/"`},
+		{"mount above ops handler", []atlas.Option{atlas.WithOpsHandler("/tools/pprof/", http.NotFoundHandler())},
+			func(a *atlas.App) { a.Mount("/tools", http.NotFoundHandler()) }, `clashes with ops handler "/tools/pprof/"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -502,26 +634,114 @@ func TestAdminServerFreesOpsPathsForTheApp(t *testing.T) {
 	}
 }
 
-func TestSpansAreNamedByRoute(t *testing.T) {
+// derivesRequest is the usual shape of tenant or auth middleware.
+func derivesRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type tenantKey struct{}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantKey{}, "acme")))
+	})
+}
+
+// startApp runs the App that build returns, given the options that isolate it for a test.
+func startApp(t *testing.T, build func(...atlas.Option) *atlas.App, opts ...atlas.Option) (string, *logSink) {
+	t.Helper()
+	ln := listenLocal(t)
+	logs := newLogSink()
+	app := build(append([]atlas.Option{
+		atlas.WithListener(ln),
+		atlas.WithoutGlobalTelemetry(),
+		atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))),
+	}, opts...)...)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	logs.waitFor(t, `"msg":"listening"`)
+	return "http://" + ln.Addr().String(), logs
+}
+
+func TestRouteSurvivesMiddlewareThatDerivesTheRequest(t *testing.T) {
 	t.Parallel()
 	spans := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /orders/{id}", func(http.ResponseWriter, *http.Request) {})
-	mux.HandleFunc("/any", func(http.ResponseWriter, *http.Request) {})
-	svc := start(t, mux, atlas.WithTracerProvider(tp))
+	seen := make(chan string, 3)
+	url, _ := startApp(t, func(opts ...atlas.Option) *atlas.App {
+		app := atlas.New(opts...)
+		app.Use(derivesRequest, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Pattern
+				next.ServeHTTP(w, r)
+			})
+		})
+		app.Get("/", text("root"))
+		app.Group("/v1", derivesRequest).Get("/orders/{id}", text("order"))
+		return app
+	}, atlas.WithTracerProvider(tp))
 
-	get(t, svc.url+"/orders/42")
-	get(t, svc.url+"/any")
-	get(t, svc.url+"/nope")
+	get(t, url+"/v1/orders/42")
+	if got := <-seen; got != "GET /v1/orders/{id}" {
+		t.Errorf("r.Pattern in app middleware = %q", got)
+	}
+	get(t, url+"/")
+	<-seen
+	get(t, url+"/nope")
+	<-seen
 
 	var names []string
 	for _, s := range spans.Ended() {
 		names = append(names, s.Name())
 	}
-	want := "GET /orders/{id},GET /any,GET"
+	want := "GET /v1/orders/{id},GET /,GET"
 	if got := strings.Join(names, ","); got != want {
 		t.Errorf("span names = %q, want %q", got, want)
+	}
+	metrics := get(t, url+"/metrics").body
+	for _, route := range []string{`http_route="/v1/orders/{id}"`, `http_route="/"`} {
+		if !strings.Contains(metrics, route) {
+			t.Errorf("metrics lack %s:\n%s", route, metrics)
+		}
+	}
+	if strings.Contains(metrics, "{$}") {
+		t.Errorf("metrics expose routing syntax:\n%s", metrics)
+	}
+}
+
+func TestAbortedResponseIsStillRecorded(t *testing.T) {
+	t.Parallel()
+	spans := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	url, logs := startApp(t, func(opts ...atlas.Option) *atlas.App {
+		app := atlas.New(opts...)
+		app.Get("/stream/{id}", func(w http.ResponseWriter, _ *http.Request) error {
+			_, _ = io.WriteString(w, strings.Repeat("x", 1<<16))
+			return errors.New("stream broke")
+		})
+		return app
+	}, atlas.WithTracerProvider(tp))
+
+	resp, err := http.Get(url + "/stream/1")
+	if err == nil {
+		_, err = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Error("client read a complete response, want a broken one")
+	}
+	logs.waitFor(t, `"aborted":true`)
+
+	metrics := get(t, url+"/metrics").body
+	if !strings.Contains(metrics, `http_route="/stream/{id}"`) {
+		t.Errorf("metrics lack the aborted request:\n%s", metrics)
+	}
+	var found bool
+	for _, s := range spans.Ended() {
+		found = found || s.Name() == "GET /stream/{id}"
+	}
+	if !found {
+		t.Error("no span named after the route")
 	}
 }
 
@@ -539,6 +759,8 @@ func restoreLogDefaults(t *testing.T) {
 
 func TestHandlerLogsCarryRequestAndTraceIDs(t *testing.T) {
 	restoreLogDefaults(t)
+	sink := newLogSink()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
 		slog.InfoContext(r.Context(), "working")
@@ -548,9 +770,9 @@ func TestHandlerLogsCarryRequestAndTraceIDs(t *testing.T) {
 	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 	got := get(t, svc.url+"/work", "traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
 
-	logs := svc.logs.records(t, "working")
+	logs := sink.records(t, "working")
 	if len(logs) != 1 {
-		t.Fatalf("working logs = %v, want one in:\n%s", logs, svc.logs)
+		t.Fatalf("working logs = %v, want one in the application's own default:\n%s", logs, sink)
 	}
 	if logs[0]["trace_id"] != traceID || logs[0]["request_id"] != got.header.Get("X-Request-ID") {
 		t.Errorf("log = %v, want trace_id %s and request_id %s", logs[0], traceID, got.header.Get("X-Request-ID"))
@@ -558,10 +780,37 @@ func TestHandlerLogsCarryRequestAndTraceIDs(t *testing.T) {
 	svc.logs.waitFor(t, `"msg":"request"`)
 	access := svc.logs.records(t, "request")
 	if len(access) != 1 || access[0]["trace_id"] != traceID {
-		t.Errorf("access log = %v, want trace_id %s once", access, traceID)
+		t.Errorf("access log = %v, want trace_id %s", access, traceID)
 	}
-	if strings.Count(svc.logs.String(), `"trace_id"`) != 2 {
-		t.Errorf("trace_id must appear once per record:\n%s", svc.logs)
+}
+
+func TestDefaultLoggerIsWrappedOnce(t *testing.T) {
+	restoreLogDefaults(t)
+	sink := newLogSink()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
+		slog.InfoContext(r.Context(), "working")
+	})
+	// Two Runs in one process, the second also passing the already wrapped default as its logger.
+	first := startWith(t, helloMux())
+	if err := first.stop(); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenLocal(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- atlas.Run(ctx, mux, atlas.WithListener(ln), atlas.WithLogger(slog.Default())) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	sink.waitFor(t, `"msg":"listening"`)
+	get(t, "http://"+ln.Addr().String()+"/work")
+	sink.waitFor(t, `"msg":"request"`)
+
+	if n := strings.Count(sink.String(), `"request_id"`); n != 2 { // one for "working", one for the access log
+		t.Errorf("request_id appears %d times, want 2, each record once:\n%s", n, sink)
 	}
 }
 
@@ -575,35 +824,75 @@ func TestWithoutGlobalTelemetryKeepsSlogDefault(t *testing.T) {
 	}
 }
 
-func TestLoggerWritingThroughPackageLogDoesNotDeadlock(t *testing.T) {
+func TestDefaultLoggerInstalledOnlyWithoutOwnLogger(t *testing.T) {
 	restoreLogDefaults(t)
-	buf := newLogSink()
-	log.SetOutput(buf)
-	log.SetFlags(0)
-	ctx, cancel := context.WithCancel(t.Context())
-	stopped := make(chan error, 1)
-	go func() {
-		stopped <- atlas.Run(ctx, helloMux(), atlas.WithListener(listenLocal(t)), atlas.WithLogger(slog.Default()))
-	}()
-	buf.waitFor(t, "listening")
+	before := slog.Default()
 
-	done := make(chan struct{})
-	go func() {
-		slog.Info("through slog")
-		log.Print("through log")
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(waitTimeout):
-		t.Fatal("logging deadlocked")
+	own := startWith(t, helloMux())
+	if err := own.stop(); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "through slog") || !strings.Contains(buf.String(), "through log") {
-		t.Errorf("output = %q", buf.String())
+	if slog.Default() != before {
+		t.Error("WithLogger replaced slog's initial default logger")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- atlas.Run(ctx, helloMux(), atlas.WithListener(listenLocal(t))) }()
+	deadline := time.Now().Add(waitTimeout)
+	for slog.Default() == before && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if slog.Default() == before {
+		t.Error("Run without a logger did not install its own as slog's default")
 	}
 	cancel()
-	if err := <-stopped; err != nil {
+	if err := <-done; err != nil {
 		t.Errorf("Run() = %v, want nil", err)
+	}
+}
+
+// wrapperHandler stands for a logging decorator around another handler.
+type wrapperHandler struct{ slog.Handler }
+
+func TestLoggerWritingThroughPackageLogDoesNotDeadlock(t *testing.T) {
+	for name, logger := range map[string]func() *slog.Logger{
+		"initial default": slog.Default,
+		"wrapped initial default": func() *slog.Logger {
+			return slog.New(wrapperHandler{slog.Default().Handler()})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restoreLogDefaults(t)
+			buf := newLogSink()
+			log.SetOutput(buf)
+			log.SetFlags(0)
+			ctx, cancel := context.WithCancel(t.Context())
+			stopped := make(chan error, 1)
+			go func() {
+				stopped <- atlas.Run(ctx, helloMux(), atlas.WithListener(listenLocal(t)), atlas.WithLogger(logger()))
+			}()
+			buf.waitFor(t, "listening")
+
+			done := make(chan struct{})
+			go func() {
+				slog.Info("through slog")
+				log.Print("through log")
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(waitTimeout):
+				t.Fatal("logging deadlocked")
+			}
+			if !strings.Contains(buf.String(), "through slog") || !strings.Contains(buf.String(), "through log") {
+				t.Errorf("output = %q", buf.String())
+			}
+			cancel()
+			if err := <-stopped; err != nil {
+				t.Errorf("Run() = %v, want nil", err)
+			}
+		})
 	}
 }
 
@@ -622,20 +911,20 @@ func TestDecode(t *testing.T) {
 		wantDetail  string
 	}{
 		{name: "valid", body: `{"name":"a","qty":2}`, contentType: "application/json", wantStatus: 200},
-		{name: "no content type", body: `{"name":"a","qty":2}`, wantStatus: 200},
 		{name: "charset", body: `{"name":"a","qty":2}`, contentType: "application/json; charset=utf-8", wantStatus: 200},
 		{name: "json suffix", body: `{"name":"a","qty":2}`, contentType: "application/vnd.api+json", wantStatus: 200},
-		{name: "unknown fields are ignored", body: `{"name":"a","qty":2,"x":1}`, wantStatus: 200},
-		{name: "trailing whitespace", body: "{\"name\":\"a\",\"qty\":2}\n ", wantStatus: 200},
+		{name: "unknown fields are ignored", body: `{"name":"a","qty":2,"x":1}`, contentType: "application/json", wantStatus: 200},
+		{name: "trailing whitespace", body: "{\"name\":\"a\",\"qty\":2}\n ", contentType: "application/json", wantStatus: 200},
+		{name: "no content type", body: `{}`, wantStatus: 415, wantDetail: "Content-Type"},
 		{name: "wrong content type", body: `{}`, contentType: "text/plain", wantStatus: 415, wantDetail: "Content-Type"},
 		{name: "broken content type", body: `{}`, contentType: "/", wantStatus: 415, wantDetail: "Content-Type"},
-		{name: "empty", body: "", wantStatus: 400, wantDetail: "empty"},
-		{name: "invalid", body: `{"name":`, wantStatus: 400, wantDetail: "invalid JSON"},
-		{name: "wrong type", body: `{"qty":"x"}`, wantStatus: 400, wantDetail: "invalid JSON"},
-		{name: "two values", body: `{} {}`, wantStatus: 400, wantDetail: "single JSON value"},
-		{name: "trailing garbage", body: `{} x`, wantStatus: 400, wantDetail: "single JSON value"},
-		{name: "over the limit", body: `{"name":"aaaaaaaaaaaaaaaaaaaa"}`, limit: 10, wantStatus: 413, wantDetail: "exceeds 10 bytes"},
-		{name: "second value over the limit", body: `{}                         {}`, limit: 10, wantStatus: 413, wantDetail: "exceeds 10 bytes"},
+		{name: "empty", body: "", contentType: "application/json", wantStatus: 400, wantDetail: "empty"},
+		{name: "invalid", body: `{"name":`, contentType: "application/json", wantStatus: 400, wantDetail: "not valid JSON"},
+		{name: "wrong type", body: `{"qty":"x"}`, contentType: "application/json", wantStatus: 400, wantDetail: `field "qty"`},
+		{name: "two values", body: `{} {}`, contentType: "application/json", wantStatus: 400, wantDetail: "single JSON value"},
+		{name: "trailing garbage", body: `{} x`, contentType: "application/json", wantStatus: 400, wantDetail: "single JSON value"},
+		{name: "over the limit", body: `{"name":"aaaaaaaaaaaaaaaaaaaa"}`, contentType: "application/json", limit: 10, wantStatus: 413, wantDetail: "exceeds 10 bytes"},
+		{name: "second value over the limit", body: `{}                         {}`, contentType: "application/json", limit: 10, wantStatus: 413, wantDetail: "exceeds 10 bytes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -680,6 +969,59 @@ func TestDecode(t *testing.T) {
 				t.Errorf("detail = %q, want it to contain %q", p.Detail, tt.wantDetail)
 			}
 		})
+	}
+}
+
+type failingBody struct{ err error }
+
+func (b failingBody) Read([]byte) (int, error) { return 0, b.err }
+func (failingBody) Close() error               { return nil }
+
+type netFailure struct{ timeout bool }
+
+func (netFailure) Error() string   { return "read tcp 10.0.3.7:8080->10.0.3.8:5000: broken" }
+func (e netFailure) Timeout() bool { return e.timeout }
+func (netFailure) Temporary() bool { return false }
+
+func TestDecodeFailures(t *testing.T) {
+	t.Parallel()
+	type input struct{ Name string }
+	decode := func(w http.ResponseWriter, r *http.Request) error {
+		_, err := atlas.Decode[input](w, r)
+		return err
+	}
+	send := func(body io.ReadCloser) *httptest.ResponseRecorder {
+		app := quietApp()
+		app.Post("/", decode)
+		req := httptest.NewRequest("POST", "/", nil)
+		req.Header.Set("Content-Type", "application/json")
+		req.Body = body
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for name, tt := range map[string]struct {
+		body io.ReadCloser
+		want int
+	}{
+		"nil body":     {nil, http.StatusBadRequest},
+		"read timeout": {failingBody{netFailure{timeout: true}}, http.StatusRequestTimeout},
+		"read failure": {failingBody{netFailure{}}, http.StatusInternalServerError},
+	} {
+		rec := send(tt.body)
+		if rec.Code != tt.want {
+			t.Errorf("%s: status = %d %s, want %d", name, rec.Code, rec.Body, tt.want)
+		}
+		if strings.Contains(rec.Body.String(), "10.0.3.7") {
+			t.Errorf("%s: response leaks the address: %s", name, rec.Body)
+		}
+	}
+
+	// Neither the Go type name nor the decoder's wording reaches the client.
+	rec := send(io.NopCloser(strings.NewReader(`{"Name":1}`)))
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "input") || strings.Contains(rec.Body.String(), "json:") {
+		t.Errorf("response = %d %s, want a 400 without internals", rec.Code, rec.Body)
 	}
 }
 

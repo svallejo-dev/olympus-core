@@ -20,7 +20,7 @@ type order struct {
 }
 
 // getOrder returns a fixed demo order whose product comes from the catalog API.
-func getOrder(catalog *hermes.Client) atlas.HandlerFunc {
+func getOrder(catalog *hermes.Client) func(http.ResponseWriter, *http.Request) error {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		id := r.PathValue("id")
 		p, err := hermes.GetJSON[product](r.Context(), catalog, "/products/sku-"+id)

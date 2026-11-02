@@ -85,7 +85,7 @@ v1 := app.Group("/v1", requireAuth)     // prefijo + middleware del grupo
 v1.Post("/orders", createOrder, audit)  // middleware de una sola ruta
 v1.Delete("/orders/{id}", deleteOrder)
 
-app.Handle("GET /legacy", legacyHandler)  // cualquier http.Handler
+app.Handle("GET /legacy", legacyHandler)  // cualquier http.Handler, con las reglas de http.ServeMux
 app.Mount("/admin", adminRouter)          // otro router, que ve el path sin "/admin"
 ```
 
@@ -97,7 +97,8 @@ app.Mount("/admin", adminRouter)          // otro router, que ve el path sin "/a
   usa `{nombre...}`. `app.Group("/v1").Get("/", h)` atiende `/v1`.
 - El orden de los middlewares es el de registro: los de la app, los del grupo y los de la ruta.
   Los de `app.Use` también corren cuando ninguna ruta coincide, que es lo que necesita un CORS para
-  responder un preflight; a cambio, `r.PathValue` y `r.Pattern` aún no están disponibles ahí.
+  responder un preflight; ahí ya está `r.Pattern`, pero todavía no `r.PathValue`. Los de un grupo o
+  una ruta no corren en un `404` o `405`, así que un `requireAuth` de grupo no oculta qué rutas existen.
 - Llamar a `Use` después de registrar rutas o grupos provoca un panic, para que un `requireAuth` nunca
   deje rutas sin proteger en silencio. Una ruta duplicada o en conflicto también, como en
   `http.ServeMux`. Los dos ocurren al arrancar.
@@ -131,32 +132,35 @@ func getOrder(w http.ResponseWriter, r *http.Request) error {
 {"type":"about:blank","title":"Not Found","status":404,"detail":"order 42 not found","request_id":"..."}
 ```
 
-El status sale de cualquier error de la cadena con un método `StatusCode() int`, así que tu dominio
-puede elegirlo sin importar atlas:
+El status sale de cualquier error de la cadena con un método `HTTPStatus() int`, así que tu dominio
+puede elegirlo sin importar atlas. No se llama `StatusCode` porque muchos SDKs tienen ese método, y el
+status y el mensaje de un backend no deben llegar a tu cliente por accidente:
 
 ```go
 type NotFoundError struct{ ID string }
 
 func (e NotFoundError) Error() string   { return "order " + e.ID + " not found" }
-func (e NotFoundError) StatusCode() int { return http.StatusNotFound }
+func (e NotFoundError) HTTPStatus() int { return http.StatusNotFound }
 ```
 
 | El handler devuelve | Status | `detail` | Log |
 |---|---|---|---|
-| Error con `StatusCode()` entre 400 y 499 | Ese status | El mensaje de ese error | No |
-| Error con `StatusCode()` entre 500 y 599 | Ese status | Ninguno | Sí, con el mensaje |
+| Error con `HTTPStatus()` entre 400 y 499 | Ese status | El mensaje de ese error | No |
+| Error con `HTTPStatus()` entre 500 y 599 | Ese status | Ninguno | Sí, con el mensaje |
 | Cualquier otro error o status fuera de rango | `500` | Ninguno | Sí, con el mensaje |
 | `context.Canceled` porque el cliente se fue | `499` | Ninguno | No |
 | Un error después de empezar a responder | Se aborta la conexión | Ninguno | Sí, con el mensaje |
 
-Los panics y las respuestas `404` y `405` del router usan el mismo formato. `WithErrorHandler(fn)`
-cambia cómo se escribe la respuesta, con `fn` como `func(w, r, err)`; el log no cambia.
+Los panics y las respuestas `404` y `405` del router usan el mismo formato, y antes de responder
+atlas quita las cabeceras de caché y de codificación que el handler hubiera puesto. `WithErrorHandler(fn)`
+cambia cómo se escribe la respuesta, con `fn` como `func(w, r, err)` y `atlas.StatusOf(err)` para
+obtener el status; el log no cambia.
 
 ## Leer y escribir JSON
 
 ```go
 func createOrder(w http.ResponseWriter, r *http.Request) error {
-	in, err := atlas.Decode[CreateOrder](w, r) // ya trae su status: 400, 413 o 415
+	in, err := atlas.Decode[CreateOrder](w, r) // el error ya trae su status
 	if err != nil {
 		return err
 	}
@@ -164,14 +168,18 @@ func createOrder(w http.ResponseWriter, r *http.Request) error {
 }
 ```
 
-`Decode` admite hasta 1 MiB (`DecodeLimit` para otro tope), acepta `application/json`, `*+json` o
-ninguna cabecera, ignora los campos desconocidos y rechaza un segundo valor tras el JSON. Es opcional,
-igual que `JSON`: puedes usar `encoding/json` directamente. Validar el contenido queda en tus manos.
+`Decode` admite hasta 1 MiB (`DecodeLimit` para otro tope), exige `application/json` o `*+json` (sin
+cabecera responde `415`, porque un POST de otro sitio sin tipo se saltaría el preflight de CORS), ignora
+los campos desconocidos y rechaza un segundo valor tras el JSON. Sus errores son `400`, `408`, `413` o
+`415`, sin nombres de tipos de Go ni direcciones de red; si falla la lectura del body es un `500` con
+el detalle en el log. Es opcional, igual que `JSON`: puedes usar `encoding/json` directamente. Validar
+el contenido queda en tus manos.
 
 ## Con otro router
 
-`atlas.Run(ctx, handler, opts...)` sirve cualquier `http.Handler` con todo lo anterior salvo el
-router y su formato de errores. Ver [Con Gin o chi](#con-gin-o-chi).
+`atlas.Run(ctx, handler, opts...)` sirve cualquier `http.Handler` con todo lo de atlas salvo el
+router y su formato de errores. Ver [Con Gin o chi](#con-gin-o-chi). Para una `App` usa `app.Run`:
+`atlas.Run(ctx, app)` también la sirve, pero sin las opciones de `New` ni la detección de conflictos.
 
 ## Arranque y apagado
 
@@ -212,8 +220,9 @@ direcciones internas o detalles de la conexión:
 - En el servidor compartido, atlas mira el método y el path exactos antes de llamar a tu handler:
   `GET` o `HEAD` sobre uno de estos cinco paths los atiende atlas; todo lo demás (otros métodos,
   `/liveness/`, `//liveness`...) llega a tu app tal cual, sin limpiar el path ni redirigir.
-- Con `app.Get("/health", h)`, `app.Run` falla al arrancar en vez de ocultar tu ruta. Con
-  `atlas.Run` y tu propio router no se puede detectar, y gana atlas.
+- Con `app.Get("/health", h)` o un `Mount` que se solape, `app.Run` falla al arrancar en vez de ocultar
+  tu ruta. La comparación es por path literal: una ruta con comodín como `/{slug}` puede convivir con
+  ellos, y `/health` lo atiende atlas. Con `atlas.Run` y tu propio router no se puede detectar, y gana atlas.
 - Con `WithAdminAddr(":9090")` estos endpoints se sirven **solo** en ese puerto y tu handler queda
   solo en el principal. Úsalo si no quieres exponer `/metrics` ni `/health` al exterior.
 
@@ -249,7 +258,7 @@ atlas; si un nombre de métrica aparece en los dos (las de Go y de proceso, que
 |---|---|---|
 | Dirección | `:$PORT` si `PORT` está definida, si no `:8080` | `WithAddr` (gana a `PORT`), `WithListener` |
 | Endpoints de operación | en el mismo servidor que la app | `WithAdminAddr`, `WithAdminListener` |
-| Logger | JSON a stdout (no toca `slog.SetDefault`) | `WithLogger` |
+| Logger | JSON a stdout, también como `slog.Default()` ([detalle](#telemetría)) | `WithLogger` |
 | `service.name` | nombre del binario (`os.Args[0]`) | `WithServiceName`; `OTEL_SERVICE_NAME` y `OTEL_RESOURCE_ATTRIBUTES` ganan al código |
 | Retardo de drenado | `5s` si existe `KUBERNETES_SERVICE_HOST`, si no `0` | `WithShutdownDelay` |
 | Timeout de apagado | `20s` | `WithShutdownTimeout` |
@@ -342,17 +351,22 @@ esperar, espéralas en un `WithShutdownHook`.
   `OTEL_TRACES_SAMPLER`...). Sin esas variables no se exporta nada, pero el contexto de traza
   entrante (`traceparent`) se propaga igual y su `trace_id` aparece en los logs. Con `App` o
   `http.ServeMux` los spans se llaman como la ruta (`GET /orders/{id}`); si no, solo con el método.
-- **Logs**: JSON por stdout, o el logger de `WithLogger`. Todo lo que se loguee con el contexto de la
+- **Logs**: JSON por stdout, o el logger de `WithLogger`. Lo que se loguee con el contexto de la
   petición lleva `request_id` y `trace_id`, también en tus handlers con
-  `slog.InfoContext(r.Context(), ...)`, sin importar atlas.
+  `slog.InfoContext(r.Context(), ...)`, sin importar atlas. Dentro de un `WithGroup`, los IDs quedan
+  dentro de ese grupo.
 - **Propagación**: W3C Trace Context + Baggage.
 - **Providers propios**: `WithMeterProvider` y `WithTracerProvider` sustituyen a los de atlas, que
   entonces no los cierra al apagar. Con un `MeterProvider` propio, `/metrics` solo muestra las
   métricas de Go y de proceso (y las de `WithPrometheusGatherer`).
 - **Globales**: salvo `WithoutGlobalTelemetry`, atlas registra como globales de OpenTelemetry el
   `MeterProvider`, el `TracerProvider` (solo si hay uno real), el propagador y un error handler
-  que escribe en el logger. También pone su logger como `slog.Default()`, sustituyendo uno que
-  hubieras puesto antes; para conservarlo, pásalo con `WithLogger(slog.Default())`.
+  que escribe en el logger. También ajusta `slog.Default()` para que tus logs lleven esos IDs:
+  - Si ya pusiste tu propio default con `slog.SetDefault`, lo conserva y solo le añade los IDs.
+  - Si no, y no usas `WithLogger`, pone el logger JSON de atlas. El paquete `log` también pasa a
+    escribir ahí, sin flags, como con cualquier `slog.SetDefault`, y no se restaura al terminar `Run`.
+  - Si usas `WithLogger` y no pusiste un default, no lo toca: llama a `slog.SetDefault(logger)` antes
+    de `Run` si quieres los IDs en `slog.InfoContext`.
 
 Las globales son el punto de encuentro con otros SDKs del mismo proceso. `hermes`, el cliente HTTP
 de olympus-core, usa por defecto `otel.GetMeterProvider()`, `otel.GetTracerProvider()` y el propagador

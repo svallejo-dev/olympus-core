@@ -10,14 +10,14 @@ import (
 	"sync"
 )
 
-// HandlerFunc handles a request and may fail; App turns a returned error into the response.
-type HandlerFunc func(w http.ResponseWriter, r *http.Request) error
+// HandlerFunc handles a request and may fail; App turns a returned error into the response. It is an alias, so any func with this signature qualifies.
+type HandlerFunc = func(w http.ResponseWriter, r *http.Request) error
 
 // Middleware wraps a handler; any func(http.Handler) http.Handler qualifies.
 type Middleware = func(http.Handler) http.Handler
 
 // App is an HTTP API: routes, middleware and error responses on an http.ServeMux, served by Run.
-// Register everything before Run or the first request; registering is not safe for concurrent use.
+// Create it with New, and register everything before Run or the first request; registering is not safe for concurrent use.
 type App struct {
 	*Router
 	cfg     config
@@ -43,12 +43,15 @@ func (a *App) Run(ctx context.Context) error {
 // ServeHTTP makes the App an http.Handler, for httptest or for mounting it elsewhere.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.once.Do(a.build)
+	// Set here, not by the mux, so metrics and logs see the route even if middleware derives a new request.
+	_, r.Pattern = a.table.mux.Handler(r)
 	a.handler.ServeHTTP(w, r)
 }
 
 func (a *App) build() {
 	a.sealed = true
 	respond := func(w http.ResponseWriter, r *http.Request) {
+		dropEntityHeaders(w.Header())
 		a.table.writeError(w, r, Errorf(http.StatusInternalServerError, "internal server error"))
 	}
 	a.handler = recoverPanicsWith(a.cfg.logger, respond, wrap(a.table, a.chain))
@@ -63,10 +66,13 @@ type Router struct {
 	sealed bool
 }
 
-// Use adds middleware to everything this Router serves; on the App it also runs for requests no route matches. It panics after a route or group is registered.
+// Use adds middleware to the routes of this Router; on the App it wraps every request, even unmatched ones, and r.Pattern is set but r.PathValue is not. It panics after a route or group is registered.
 func (r *Router) Use(mw ...Middleware) {
 	if r.sealed {
 		panic("atlas: Use must be called before registering routes or groups")
+	}
+	if slices.ContainsFunc(mw, func(m Middleware) bool { return m == nil }) {
+		panic("atlas: nil middleware")
 	}
 	r.chain = append(r.chain, mw...)
 }
@@ -108,10 +114,12 @@ func (r *Router) Method(method, path string, h HandlerFunc, mw ...Middleware) {
 	if h == nil {
 		panic(fmt.Sprintf("atlas: nil handler for %s %s", method, r.prefix+path))
 	}
-	r.register(method, path, r.table.adapt(h), mw)
+	validatePath(path)
+	full := joinPath(r.prefix, path)
+	r.register(strings.ToUpper(method), full, exactPath(full), r.table.adapt(h), mw)
 }
 
-// Handle registers a standard handler for pattern, "METHOD /path" or "/path" for every method.
+// Handle registers a standard handler for pattern, "METHOD /path" or "/path" for every method, with http.ServeMux's meaning: a trailing slash matches a subtree.
 func (r *Router) Handle(pattern string, h http.Handler, mw ...Middleware) {
 	method, path, ok := strings.Cut(pattern, " ")
 	if !ok {
@@ -120,7 +128,10 @@ func (r *Router) Handle(pattern string, h http.Handler, mw ...Middleware) {
 	if h == nil {
 		panic(fmt.Sprintf("atlas: nil handler for %s", pattern))
 	}
-	r.register(method, strings.TrimSpace(path), h, mw)
+	path = strings.TrimSpace(path)
+	validatePath(path)
+	full := r.prefix + path
+	r.register(method, full, full, h, mw)
 }
 
 // Mount serves h for every method under prefix, without wildcards, removing prefix from the path h sees.
@@ -139,17 +150,23 @@ func (r *Router) Mount(prefix string, h http.Handler, mw ...Middleware) {
 	mounted := wrap(wrap(stripPrefix(full, h), mw), r.routeChain())
 	r.table.mux.Handle(full, mounted)
 	r.table.mux.Handle(full+"/", mounted)
-	r.table.routes = append(r.table.routes, route{path: full})
+	r.table.routes = append(r.table.routes, route{path: full + "/"}, route{path: full})
 }
 
-func (r *Router) register(method, path string, h http.Handler, mw []Middleware) {
+func (r *Router) register(method, full, muxPath string, h http.Handler, mw []Middleware) {
+	r.sealed = true
+	pattern := muxPath
+	if method != "" {
+		pattern = method + " " + muxPath
+	}
+	r.table.mux.Handle(pattern, wrap(wrap(h, mw), r.routeChain()))
+	r.table.routes = append(r.table.routes, route{method: method, path: full})
+}
+
+func validatePath(path string) {
 	if path != "" && !strings.HasPrefix(path, "/") {
 		panic(fmt.Sprintf("atlas: path %q must start with /", path))
 	}
-	r.sealed = true
-	full := joinPath(r.prefix, path)
-	r.table.mux.Handle(muxPattern(method, full), wrap(wrap(h, mw), r.routeChain()))
-	r.table.routes = append(r.table.routes, route{method: method, path: full})
 }
 
 // routeChain is empty on the App's root Router, whose middleware wraps the whole table so it also sees unmatched requests.
@@ -171,15 +188,12 @@ func joinPath(prefix, path string) string {
 	return prefix + path
 }
 
-// muxPattern makes a path match exactly: to http.ServeMux a trailing slash means a subtree, and "/" every path.
-func muxPattern(method, path string) string {
+// exactPath makes a path match exactly: to http.ServeMux a trailing slash means a subtree, and "/" every path.
+func exactPath(path string) string {
 	if strings.HasSuffix(path, "/") {
-		path += "{$}"
+		return path + "{$}"
 	}
-	if method == "" {
-		return path
-	}
-	return method + " " + path
+	return path
 }
 
 func validatePrefix(prefix string) {
@@ -191,19 +205,32 @@ func validatePrefix(prefix string) {
 // wrap applies chain so that its first middleware runs first.
 func wrap(h http.Handler, chain []Middleware) http.Handler {
 	for _, mw := range slices.Backward(chain) {
+		if mw == nil {
+			panic("atlas: nil middleware")
+		}
 		h = mw(h)
 	}
 	return h
 }
 
-// stripPrefix also turns the mount point itself into "/", which is what a nested router expects.
+// stripPrefix differs from http.StripPrefix in two cases: the mount point itself becomes "/", which is
+// what a nested router expects, and a percent-encoded prefix still matches, as it did for the mux.
 func stripPrefix(prefix string, h http.Handler) http.Handler {
-	return http.StripPrefix(prefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "" {
-			r.URL.Path, r.URL.RawPath = "/", ""
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := *r.URL
+		u.Path = strings.TrimPrefix(u.Path, prefix)
+		rawPath, ok := strings.CutPrefix(u.RawPath, prefix)
+		if !ok {
+			rawPath = ""
 		}
-		h.ServeHTTP(w, r)
-	}))
+		u.RawPath = rawPath
+		if u.Path == "" {
+			u.Path, u.RawPath = "/", ""
+		}
+		stripped := r.WithContext(r.Context())
+		stripped.URL = &u
+		h.ServeHTTP(w, stripped)
+	})
 }
 
 type route struct {
@@ -220,7 +247,7 @@ type routeTable struct {
 }
 
 func (t *routeTable) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if _, pattern := t.mux.Handler(r); pattern != "" {
+	if r.Pattern != "" {
 		t.mux.ServeHTTP(w, r)
 		return
 	}

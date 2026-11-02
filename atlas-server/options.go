@@ -46,6 +46,7 @@ type config struct {
 	tracerProvider  trace.TracerProvider
 	globalTelemetry bool
 	accessLog       bool
+	ownLogger       bool
 	errorHandler    func(http.ResponseWriter, *http.Request, error)
 	routes          []route
 }
@@ -74,7 +75,7 @@ func newConfig(opts []Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	cfg.logger = slog.New(contextHandler{cfg.logger.Handler()})
+	cfg.logger = slog.New(withContextIDs(cfg.logger.Handler()))
 	return cfg
 }
 
@@ -130,12 +131,17 @@ func (c *config) routeConflicts() []error {
 			errs = append(errs, fmt.Errorf("route %q clashes with the ops endpoint; rename it or use WithAdminAddr", rt.path))
 		}
 		for _, oh := range c.opsHandlers {
-			if oh.pattern == rt.path || (strings.HasSuffix(oh.pattern, "/") && strings.HasPrefix(rt.path, oh.pattern)) {
+			if pathsOverlap(rt.path, oh.pattern) {
 				errs = append(errs, fmt.Errorf("route %q clashes with ops handler %q", rt.path, oh.pattern))
 			}
 		}
 	}
 	return errs
+}
+
+// pathsOverlap compares literal paths, where a trailing slash means a subtree; a wildcard route like /{slug} can still lose single paths to the ops endpoints.
+func pathsOverlap(a, b string) bool {
+	return a == b || (strings.HasSuffix(a, "/") && strings.HasPrefix(b, a)) || (strings.HasSuffix(b, "/") && strings.HasPrefix(a, b))
 }
 
 func validateNamed(kind, name string, isNil bool) error {
@@ -182,11 +188,12 @@ func WithAdminListener(ln net.Listener) Option {
 	return func(c *config) { c.adminListener = ln }
 }
 
-// WithLogger sets the logger for lifecycle, access and panic logs, which also gets each request's IDs; nil keeps the JSON stdout default.
+// WithLogger sets the logger for atlas' lifecycle, access and panic logs, adding each request's IDs; it does not change slog's default. nil keeps the JSON stdout default.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *config) {
 		if logger != nil {
 			c.logger = logger
+			c.ownLogger = true
 		}
 	}
 }
@@ -253,7 +260,7 @@ func WithoutGlobalTelemetry() Option {
 	return func(c *config) { c.globalTelemetry = false }
 }
 
-// WithErrorHandler replaces how an App writes a handler's error, a 404 or a 405, by default an RFC 9457 JSON body; nil keeps the default.
+// WithErrorHandler replaces how an App writes a handler's error, a panic, a 404 or a 405, by default an RFC 9457 JSON body; use StatusOf for the status, and nil keeps the default.
 func WithErrorHandler(write func(w http.ResponseWriter, r *http.Request, err error)) Option {
 	return func(c *config) {
 		if write != nil {

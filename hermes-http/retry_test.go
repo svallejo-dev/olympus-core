@@ -174,6 +174,23 @@ func TestIdempotentMarksOnlyItsRequest(t *testing.T) {
 	}
 }
 
+func TestIdempotentMarkDoesNotReachTheTokenCall(t *testing.T) {
+	tokenCodes, tokenHits := statusSequence(503, 503, 503)
+	tokens := newClient(t, newServer(t, tokenCodes).URL, hermes.WithRetry(hermes.RetryPolicy{
+		InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+	}))
+	h, _ := statusSequence(200)
+	c := newClient(t, newServer(t, h).URL, hermes.WithBearerToken(func(ctx context.Context) (string, error) {
+		_, err := hermes.PostJSON[map[string]any](ctx, tokens, "/oauth/token", map[string]string{})
+		return "", err
+	}))
+
+	_, _ = hermes.PostJSON[map[string]any](t.Context(), c, "/", map[string]string{}, hermes.Idempotent())
+	if tokenHits.Load() != 1 {
+		t.Errorf("token POST attempts = %d, want 1: nobody marked it idempotent", tokenHits.Load())
+	}
+}
+
 func TestNoRetryWithoutReplayableBody(t *testing.T) {
 	h, hits := statusSequence(503, 200)
 	c := newClient(t, newServer(t, h).URL)
