@@ -70,6 +70,12 @@ func quietApp(opts ...atlas.Option) *atlas.App {
 	return atlas.New(append([]atlas.Option{atlas.WithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
 }
 
+// loggedApp returns an App whose logs the test can read.
+func loggedApp() (*atlas.App, *logSink) {
+	logs := newLogSink()
+	return atlas.New(atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil)))), logs
+}
+
 func TestRoutes(t *testing.T) {
 	t.Parallel()
 	app := quietApp()
@@ -222,8 +228,7 @@ func TestHandlerErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			logs := newLogSink()
-			app := atlas.New(atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+			app, logs := loggedApp()
 			app.Get("/", func(http.ResponseWriter, *http.Request) error { return tt.err })
 
 			rec := serveApp(app, "GET", "/", nil)
@@ -375,8 +380,7 @@ func TestMountWithEncodedPrefixStillMatches(t *testing.T) {
 
 func TestHandlerErrorAfterResponseStarted(t *testing.T) {
 	t.Parallel()
-	logs := newLogSink()
-	app := atlas.New(atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+	app, logs := loggedApp()
 	app.Get("/", func(w http.ResponseWriter, _ *http.Request) error {
 		_, _ = io.WriteString(w, "partial")
 		return errors.New("stream broke")
@@ -395,8 +399,7 @@ func TestHandlerErrorAfterResponseStarted(t *testing.T) {
 
 func TestCanceledRequestIsNotAServerError(t *testing.T) {
 	t.Parallel()
-	logs := newLogSink()
-	app := atlas.New(atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+	app, logs := loggedApp()
 	app.Get("/", func(_ http.ResponseWriter, r *http.Request) error { return r.Context().Err() })
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -431,8 +434,7 @@ func TestWithErrorHandler(t *testing.T) {
 
 func TestPanicBecomesProblem(t *testing.T) {
 	t.Parallel()
-	logs := newLogSink()
-	app := atlas.New(atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+	app, logs := loggedApp()
 	app.Get("/", func(http.ResponseWriter, *http.Request) error { panic("secret detail") })
 
 	rec := serveApp(app, "GET", "/", nil)
@@ -611,22 +613,14 @@ func TestAppRunRejectsRoutesShadowedByOpsEndpoints(t *testing.T) {
 
 func TestAdminServerFreesOpsPathsForTheApp(t *testing.T) {
 	t.Parallel()
-	ln, adminLn := listenLocal(t), listenLocal(t)
-	logs := newLogSink()
-	app := atlas.New(
-		atlas.WithListener(ln),
-		atlas.WithAdminListener(adminLn),
-		atlas.WithoutGlobalTelemetry(),
-		atlas.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))),
-	)
-	app.Get("/health", text("app health"))
+	adminLn := listenLocal(t)
+	url, _ := startApp(t, func(opts ...atlas.Option) *atlas.App {
+		app := atlas.New(opts...)
+		app.Get("/health", text("app health"))
+		return app
+	}, atlas.WithAdminListener(adminLn))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go func() { _ = app.Run(ctx) }()
-	logs.waitFor(t, `"msg":"listening"`)
-
-	if got := get(t, "http://"+ln.Addr().String()+"/health"); got.body != "app health" {
+	if got := get(t, url+"/health"); got.body != "app health" {
 		t.Errorf("app GET /health = %q", got.body)
 	}
 	if got := get(t, "http://"+adminLn.Addr().String()+"/health"); got.status != http.StatusOK || got.body == "app health" {

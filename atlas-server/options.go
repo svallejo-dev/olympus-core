@@ -141,7 +141,9 @@ func (c *config) routeConflicts() []error {
 
 // pathsOverlap compares literal paths, where a trailing slash means a subtree; a wildcard route like /{slug} can still lose single paths to the ops endpoints.
 func pathsOverlap(a, b string) bool {
-	return a == b || (strings.HasSuffix(a, "/") && strings.HasPrefix(b, a)) || (strings.HasSuffix(b, "/") && strings.HasPrefix(a, b))
+	return a == b ||
+		(strings.HasSuffix(a, "/") && strings.HasPrefix(b, a)) ||
+		(strings.HasSuffix(b, "/") && strings.HasPrefix(a, b))
 }
 
 func validateNamed(kind, name string, isNil bool) error {

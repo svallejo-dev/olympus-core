@@ -43,16 +43,7 @@ func TestMetricsAreRecorded(t *testing.T) {
 		t.Fatalf("err = %v, want ErrCircuitOpen", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(t.Context(), &rm); err != nil {
-		t.Fatal(err)
-	}
-	metrics := make(map[string]metricdata.Aggregation)
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			metrics[m.Name] = m.Data
-		}
-	}
+	metrics := collectMetrics(t, reader)
 
 	retries := sumPoints(t, metrics["hermes.client.retries"])
 	if len(retries) != 1 || retries[0].Value != 1 || attr(retries[0].Attributes, "hermes.retry.reason") != "503" ||
@@ -70,6 +61,21 @@ func TestMetricsAreRecorded(t *testing.T) {
 	if _, ok := metrics["http.client.request.duration"]; !ok {
 		t.Error("otelhttp metric http.client.request.duration not recorded")
 	}
+}
+
+func collectMetrics(t *testing.T, reader sdkmetric.Reader) map[string]metricdata.Aggregation {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	metrics := make(map[string]metricdata.Aggregation)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			metrics[m.Name] = m.Data
+		}
+	}
+	return metrics
 }
 
 func sumPoints(t *testing.T, agg metricdata.Aggregation) []metricdata.DataPoint[int64] {
@@ -129,22 +135,11 @@ func TestTraceContextIsInjectedOncePerCall(t *testing.T) {
 // errorTypes collects the error.type values recorded on the client duration metric.
 func errorTypes(t *testing.T, reader sdkmetric.Reader) []string {
 	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(t.Context(), &rm); err != nil {
-		t.Fatal(err)
-	}
+	hist, _ := collectMetrics(t, reader)["http.client.request.duration"].(metricdata.Histogram[float64])
 	var got []string
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			hist, ok := m.Data.(metricdata.Histogram[float64])
-			if m.Name != "http.client.request.duration" || !ok {
-				continue
-			}
-			for _, dp := range hist.DataPoints {
-				if v, ok := dp.Attributes.Value("error.type"); ok {
-					got = append(got, v.AsString())
-				}
-			}
+	for _, dp := range hist.DataPoints {
+		if v, ok := dp.Attributes.Value("error.type"); ok {
+			got = append(got, v.AsString())
 		}
 	}
 	return got
@@ -163,6 +158,7 @@ func TestErrorTypeNamesTheFailure(t *testing.T) {
 		t.Cleanup(cancel)
 		return ctx
 	}
+	fetch := func(ctx context.Context, c *hermes.Client) { _, _ = hermes.GetJSON[struct{}](ctx, c, "/") }
 
 	tests := []struct {
 		name    string
@@ -173,23 +169,23 @@ func TestErrorTypeNamesTheFailure(t *testing.T) {
 	}{
 		{"open breaker", fail, []hermes.Option{hermes.WithoutRetry(), hermes.WithCircuitBreaker(hermes.BreakerPolicy{ConsecutiveFailures: 1})},
 			func(t *testing.T, c *hermes.Client) {
-				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
-				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
+				fetch(t.Context(), c)
+				fetch(t.Context(), c)
 			}, "circuitOpenError"},
 		{"attempt timeout", block, []hermes.Option{hermes.WithoutRetry(), hermes.WithAttemptTimeout(20 * time.Millisecond)},
-			func(t *testing.T, c *hermes.Client) { _, _ = hermes.GetJSON[struct{}](t.Context(), c, "/") }, "attemptTimeoutError"},
+			func(t *testing.T, c *hermes.Client) { fetch(t.Context(), c) }, "attemptTimeoutError"},
 		{"rate limit", fail, []hermes.Option{hermes.WithoutRetry(), hermes.WithRateLimit(0.001, 1)},
 			func(t *testing.T, c *hermes.Client) {
-				_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
-				_, _ = hermes.GetJSON[struct{}](shortly(t), c, "/")
+				fetch(t.Context(), c)
+				fetch(shortly(t), c)
 			}, "rateLimitError"},
 		{"concurrency slot", block, []hermes.Option{hermes.WithoutRetry(), hermes.WithMaxConcurrent(1)},
 			func(t *testing.T, c *hermes.Client) {
 				holder, release := context.WithCancel(t.Context())
 				var wg sync.WaitGroup
-				wg.Go(func() { _, _ = hermes.GetJSON[struct{}](holder, c, "/") })
+				wg.Go(func() { fetch(holder, c) })
 				time.Sleep(50 * time.Millisecond)
-				_, _ = hermes.GetJSON[struct{}](shortly(t), c, "/")
+				fetch(shortly(t), c)
 				release()
 				wg.Wait()
 			}, "concurrencyError"},
@@ -198,7 +194,7 @@ func TestErrorTypeNamesTheFailure(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				time.AfterFunc(100*time.Millisecond, cancel)
-				_, _ = hermes.GetJSON[struct{}](ctx, c, "/")
+				fetch(ctx, c)
 			}, "retryWaitError"},
 	}
 	for _, tt := range tests {

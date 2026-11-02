@@ -1,6 +1,7 @@
 package atlas
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -121,12 +122,12 @@ func (r *Router) Method(method, path string, h HandlerFunc, mw ...Middleware) {
 
 // Handle registers a standard handler for pattern, "METHOD /path" or "/path" for every method, with http.ServeMux's meaning: a trailing slash matches a subtree.
 func (r *Router) Handle(pattern string, h http.Handler, mw ...Middleware) {
+	if h == nil {
+		panic(fmt.Sprintf("atlas: nil handler for %s", pattern))
+	}
 	method, path, ok := strings.Cut(pattern, " ")
 	if !ok {
 		method, path = "", pattern
-	}
-	if h == nil {
-		panic(fmt.Sprintf("atlas: nil handler for %s", pattern))
 	}
 	path = strings.TrimSpace(path)
 	validatePath(path)
@@ -179,11 +180,8 @@ func (r *Router) routeChain() []Middleware {
 
 // joinPath makes "/" on a group mean the group's own path.
 func joinPath(prefix, path string) string {
-	switch {
-	case prefix == "" && path == "":
-		return "/"
-	case path == "/" && prefix != "":
-		return prefix
+	if path == "" || path == "/" {
+		return cmp.Or(prefix, "/")
 	}
 	return prefix + path
 }
