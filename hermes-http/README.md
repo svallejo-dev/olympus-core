@@ -190,7 +190,9 @@ servicio arrancado con `atlas`, que registra los globales al iniciar, las métri
 aparecen en su `/metrics` y los spans se encadenan con los del servidor sin que ningún módulo
 importe al otro. Para inyectarlos explícitamente: `WithMeterProvider`, `WithTracerProvider` y
 `WithPropagators`. Los cambios de estado del breaker se loguean en `Warn` y los reintentos en
-`Debug` con `slog.Default()` o el logger de `WithLogger`.
+`Debug` con `slog.Default()` o el logger de `WithLogger`. Con atlas y el logger por defecto, los
+reintentos llevan `request_id` y `trace_id`; los cambios del breaker no, porque afectan al host y no a
+una petición.
 
 ## Con clientes generados
 
