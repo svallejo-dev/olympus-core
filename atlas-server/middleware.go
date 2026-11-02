@@ -87,12 +87,24 @@ func logRequest(logger *slog.Logger, r *http.Request, rec *responseRecorder, ela
 		slog.String("path", r.URL.Path),
 		slog.Int("status", status),
 		slog.Int64("bytes", rec.bytes),
-		slog.Duration("duration", elapsed),
+		slog.Float64("duration_ms", float64(elapsed.Microseconds())/1000),
+	}
+	if route := routeOf(r.Pattern); route != "" {
+		attrs = append(attrs, slog.String("route", route))
 	}
 	if aborted {
 		attrs = append(attrs, slog.Bool("aborted", true))
 	}
 	logger.LogAttrs(r.Context(), level, "request", attrs...)
+}
+
+// routeOf returns the path of a ServeMux pattern, without its method or the {$} routing syntax.
+func routeOf(pattern string) string {
+	_, path, found := strings.Cut(pattern, " ")
+	if !found {
+		path = pattern
+	}
+	return strings.TrimSuffix(path, "{$}")
 }
 
 type responseRecorder struct {
@@ -158,7 +170,7 @@ func (rec *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return conn, rw, err
 }
 
-// contextHandler adds the request and trace IDs of the record's context, so logs from handlers can be correlated without calling atlas.
+// contextHandler adds the request, trace and span IDs of the record's context, so logs from handlers can be correlated without calling atlas.
 type contextHandler struct {
 	slog.Handler
 }
@@ -176,7 +188,7 @@ func (h contextHandler) Handle(ctx context.Context, record slog.Record) error {
 		record.AddAttrs(slog.String("request_id", id))
 	}
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		record.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
+		record.AddAttrs(slog.String("trace_id", sc.TraceID().String()), slog.String("span_id", sc.SpanID().String()))
 	}
 	return h.Handler.Handle(ctx, record)
 }

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -75,23 +77,52 @@ func newTelemetry(ctx context.Context, cfg *config) (*telemetry, error) {
 		t.shutdowns = append(t.shutdowns, mp.Shutdown)
 	}
 
-	if t.tracerProvider == nil && otlpConfigured() {
-		exporter, err := otlptracehttp.New(ctx)
-		if err != nil {
-			return nil, errors.Join(fmt.Errorf("create otlp trace exporter: %w", err), t.shutdown(ctx))
+	if t.tracerProvider == nil {
+		if err := t.setUpTracing(ctx, res, cfg.globalTelemetry); err != nil {
+			return nil, errors.Join(err, t.shutdown(ctx))
 		}
-		tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
-		t.tracerProvider = tp
-		t.shutdowns = append(t.shutdowns, tp.Shutdown)
 	}
 
 	if cfg.globalTelemetry {
 		t.setGlobals(cfg.logger, cfg.ownLogger)
 	}
-	if t.tracerProvider == nil {
-		t.tracerProvider = otel.GetTracerProvider()
-	}
 	return t, nil
+}
+
+var (
+	// unsetTracerProvider is the type otel.GetTracerProvider returns until someone sets a global provider.
+	unsetTracerProvider = reflect.TypeOf(otel.GetTracerProvider())
+	// lastTracerProvider tells the provider of an earlier Run, already shut down, from one the application set.
+	lastTracerProvider atomic.Pointer[sdktrace.TracerProvider]
+)
+
+func applicationSetTracerProvider(global trace.TracerProvider) bool {
+	if tp, ok := global.(*sdktrace.TracerProvider); ok && tp == lastTracerProvider.Load() {
+		return false
+	}
+	return reflect.TypeOf(global) != unsetTracerProvider
+}
+
+// setUpTracing keeps a global provider the application set, unless OTLP is configured. Otherwise it
+// creates one even with nothing to export to, because only a real provider generates trace IDs for logs.
+func (t *telemetry) setUpTracing(ctx context.Context, res *resource.Resource, useGlobal bool) error {
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
+	switch global := otel.GetTracerProvider(); {
+	case otlpConfigured():
+		exporter, err := otlptracehttp.New(ctx)
+		if err != nil {
+			return fmt.Errorf("create otlp trace exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
+	case useGlobal && applicationSetTracerProvider(global):
+		t.tracerProvider = global
+		return nil
+	}
+	tp := sdktrace.NewTracerProvider(opts...)
+	lastTracerProvider.Store(tp)
+	t.tracerProvider = tp
+	t.shutdowns = append(t.shutdowns, tp.Shutdown)
+	return nil
 }
 
 func otlpConfigured() bool {
@@ -100,9 +131,7 @@ func otlpConfigured() bool {
 
 func (t *telemetry) setGlobals(logger *slog.Logger, ownLogger bool) {
 	otel.SetMeterProvider(t.meterProvider)
-	if t.tracerProvider != nil {
-		otel.SetTracerProvider(t.tracerProvider)
-	}
+	otel.SetTracerProvider(t.tracerProvider)
 	otel.SetTextMapPropagator(t.propagator)
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		logger.Error("opentelemetry", "err", err)
@@ -114,15 +143,24 @@ func (t *telemetry) setGlobals(logger *slog.Logger, ownLogger bool) {
 var stdlibDefaultHandler = reflect.TypeOf(slog.Default().Handler())
 
 // setDefaultLogger makes slog calls in handlers carry the request's IDs. A default the application
-// chose is kept and only gains the IDs. A logger from WithLogger stays out of it: SetDefault points
-// package log at the new handler, so one built on slog's initial handler would deadlock.
+// chose is kept and only gains the IDs.
 func setDefaultLogger(logger *slog.Logger, ownLogger bool) {
 	current := slog.Default().Handler()
+	if _, wrapped := current.(contextHandler); wrapped {
+		return
+	}
 	switch {
 	case reflect.TypeOf(current) != stdlibDefaultHandler:
 		slog.SetDefault(slog.New(withContextIDs(current)))
 	case !ownLogger:
 		slog.SetDefault(logger)
+	default:
+		// SetDefault points package log at the new handler. A logger from WithLogger may be built on
+		// slog's initial handler, which writes through package log, so that would deadlock.
+		writer, flags := log.Writer(), log.Flags()
+		slog.SetDefault(logger)
+		log.SetOutput(writer)
+		log.SetFlags(flags)
 	}
 }
 

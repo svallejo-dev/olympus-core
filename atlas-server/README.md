@@ -258,7 +258,7 @@ atlas; si un nombre de métrica aparece en los dos (las de Go y de proceso, que
 |---|---|---|
 | Dirección | `:$PORT` si `PORT` está definida, si no `:8080` | `WithAddr` (gana a `PORT`), `WithListener` |
 | Endpoints de operación | en el mismo servidor que la app | `WithAdminAddr`, `WithAdminListener` |
-| Logger | JSON a stdout, también como `slog.Default()` ([detalle](#telemetría)) | `WithLogger` |
+| Logger | JSON a stdout, también como `slog.Default()` ([detalle](#logs)) | `WithLogger` |
 | `service.name` | nombre del binario (`os.Args[0]`) | `WithServiceName`; `OTEL_SERVICE_NAME` y `OTEL_RESOURCE_ATTRIBUTES` ganan al código |
 | Retardo de drenado | `5s` si existe `KUBERNETES_SERVICE_HOST`, si no `0` | `WithShutdownDelay` |
 | Timeout de apagado | `20s` | `WithShutdownTimeout` |
@@ -341,6 +341,8 @@ esperar, espéralas en un `WithShutdownHook`.
 
 ## Telemetría
 
+Los logs tienen [su propia sección](#logs).
+
 - **Métricas**: atlas crea un `MeterProvider` del SDK con el exportador Prometheus sobre un
   registro privado que además incluye los colectores de Go y de proceso. `/metrics` sirve ese
   registro: `http_server_request_duration_seconds` (con `http_route` si usas `App` o un
@@ -348,31 +350,115 @@ esperar, espéralas en un `WithShutdownHook`.
 - **Trazas**: si defines `OTEL_EXPORTER_OTLP_ENDPOINT` (o `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`),
   atlas crea un `TracerProvider` con exportador OTLP/HTTP y procesador batch. El resto de la
   configuración sale de las variables estándar (`OTEL_EXPORTER_OTLP_HEADERS`,
-  `OTEL_TRACES_SAMPLER`...). Sin esas variables no se exporta nada, pero el contexto de traza
-  entrante (`traceparent`) se propaga igual y su `trace_id` aparece en los logs. Con `App` o
-  `http.ServeMux` los spans se llaman como la ruta (`GET /orders/{id}`); si no, solo con el método.
-- **Logs**: JSON por stdout, o el logger de `WithLogger`. Lo que se loguee con el contexto de la
-  petición lleva `request_id` y `trace_id`, también en tus handlers con
-  `slog.InfoContext(r.Context(), ...)`, sin importar atlas. Dentro de un `WithGroup`, los IDs quedan
-  dentro de ese grupo.
+  `OTEL_TRACES_SAMPLER`...). Sin esas variables atlas crea el `TracerProvider` igualmente, sin
+  exportar nada, para que cada petición tenga `trace_id` y `span_id` en los logs y `traceparent` en sus
+  llamadas salientes; si ya pusiste un provider global, usa ese. Con `App` o `http.ServeMux` los spans
+  se llaman como la ruta (`GET /orders/{id}`); si no, solo con el método.
 - **Propagación**: W3C Trace Context + Baggage.
 - **Providers propios**: `WithMeterProvider` y `WithTracerProvider` sustituyen a los de atlas, que
   entonces no los cierra al apagar. Con un `MeterProvider` propio, `/metrics` solo muestra las
   métricas de Go y de proceso (y las de `WithPrometheusGatherer`).
 - **Globales**: salvo `WithoutGlobalTelemetry`, atlas registra como globales de OpenTelemetry el
   `MeterProvider`, el `TracerProvider` (solo si hay uno real), el propagador y un error handler
-  que escribe en el logger. También ajusta `slog.Default()` para que tus logs lleven esos IDs:
-  - Si ya pusiste tu propio default con `slog.SetDefault`, lo conserva y solo le añade los IDs.
-  - Si no, y no usas `WithLogger`, pone el logger JSON de atlas. El paquete `log` también pasa a
-    escribir ahí, sin flags, como con cualquier `slog.SetDefault`, y no se restaura al terminar `Run`.
-  - Si usas `WithLogger` y no pusiste un default, no lo toca: llama a `slog.SetDefault(logger)` antes
-    de `Run` si quieres los IDs en `slog.InfoContext`.
+  que escribe en el logger. También ajusta `slog.Default()`, como se explica en [Logs](#logs).
+  Con esta opción, atlas tampoco lee el provider global.
 
 Las globales son el punto de encuentro con otros SDKs del mismo proceso. `hermes`, el cliente HTTP
 de olympus-core, usa por defecto `otel.GetMeterProvider()`, `otel.GetTracerProvider()` y el propagador
 global; por eso, con atlas en el mismo binario, sus métricas de cliente salen en el mismo
 `/metrics` y sus spans cuelgan de la traza de la petición entrante, sin que ninguno de los dos
 módulos dependa del otro.
+
+## Logs
+
+atlas usa solo `log/slog`, sin dependencias de logging. Cada línea es un JSON con estos campos:
+
+| Campo | En qué líneas | De dónde sale |
+|---|---|---|
+| `time` | Todas | `slog`: RFC 3339 con la zona horaria de la máquina |
+| `level`, `msg` | Todas | `slog` |
+| `service` | Todas | `OTEL_SERVICE_NAME`, `service.name` en `OTEL_RESOURCE_ATTRIBUTES`, `WithServiceName` o el nombre del binario, en ese orden |
+| `version` | Todas, si existe | `service.version` en `OTEL_RESOURCE_ATTRIBUTES` |
+| `request_id` | Las logueadas con el contexto de una petición | La cabecera `X-Request-ID` si es válida; si no, se genera. Se devuelve en la respuesta |
+| `trace_id`, `span_id` | Las logueadas con el contexto de una petición | El `traceparent` entrante, o una traza nueva si no llega |
+
+Además, cada petición escribe una línea de access log, con `msg: "request"`:
+
+```json
+{"time":"2026-11-01T20:57:05.71-05:00","level":"INFO","msg":"request","service":"orders-api","method":"GET","path":"/v1/orders/42","status":200,"bytes":74,"duration_ms":1.934,"route":"/v1/orders/{id}","request_id":"AKJK...","trace_id":"4bf9...","span_id":"00f0..."}
+```
+
+Es `ERROR` con status 5xx o si la respuesta se aborta, y `INFO` en los demás casos. Registra el path sin
+la query, porque suele llevar datos sensibles. `route` falta si no hay ruta o si usas chi o Gin.
+`WithoutAccessLog` la desactiva.
+
+### En tus handlers
+
+Usa las variantes con contexto, sin importar atlas:
+
+```go
+slog.InfoContext(r.Context(), "order created", "order_id", id)
+```
+
+```json
+{"time":"...","level":"INFO","msg":"order created","service":"orders-api","order_id":"42","request_id":"AKJK...","trace_id":"4bf9...","span_id":"00f0..."}
+```
+
+Go no tiene almacenamiento por goroutine, así que los IDs solo viajan en el contexto:
+
+- `slog.Info("...")`, sin contexto, sale sin IDs. La regla `context` de `sloglint` en `golangci-lint`
+  lo detecta en tu código.
+- Una goroutine que lanzas desde el handler los conserva si le pasas `r.Context()` o, para que
+  sobreviva a la petición, `context.WithoutCancel(r.Context())`.
+- Un logger guardado con `slog.Default()` antes de `Run`, por ejemplo en una variable de paquete,
+  sigue siendo el anterior y no añade los IDs. Pide `slog.Default()` cuando lo vayas a usar.
+- Dentro de un `WithGroup`, los IDs quedan dentro de ese grupo.
+- Los logs de arranque, apagado y trabajos en segundo plano no pertenecen a una petición, así que no
+  llevan IDs.
+
+### Quién es `slog.Default()`
+
+Salvo `WithoutGlobalTelemetry`, `Run` lo ajusta para que tus logs lleven los IDs:
+
+| Situación | Qué hace `Run` |
+|---|---|
+| No pusiste nada | Pone el logger JSON de atlas. El paquete `log` también pasa a escribir ahí, sin flags, y no se restaura al terminar |
+| Usas `WithLogger` | Pone ese logger con los IDs. El paquete `log` no cambia |
+| Ya llamaste a `slog.SetDefault` | Conserva tu logger y solo le añade los IDs |
+
+Con `WithLogger` no se añaden `service` ni `version`, porque tu logger decide sus campos. Puedes añadirlos con
+`logger.With("service", ...)`.
+
+### Personalizar
+
+El nivel por defecto es `INFO`. Para cambiar el nivel, el formato o el nombre de un campo, pasa tu propio
+logger; `slog` lo cubre sin librerías externas:
+
+```go
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	Level:     slog.LevelDebug,
+	AddSource: true, // añade archivo y línea, con algo de coste
+	ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			a.Key = "timestamp" // si tu plataforma espera otro nombre
+			a.Value = slog.TimeValue(a.Value.Time().UTC())
+		}
+		return a
+	},
+}))
+app := atlas.New(atlas.WithLogger(logger.With("service", "orders-api")))
+```
+
+Para que un dato sensible no salga nunca, dale a su tipo un método `LogValue`.
+
+### Hacia otros servicios
+
+`trace_id` viaja con `traceparent` si llamas con hermes u otro cliente instrumentado, así que el servicio
+siguiente continúa la misma traza. `request_id` no se reenvía solo, porque hermes no conoce a atlas:
+`hermes.Header("X-Request-ID", atlas.RequestID(ctx))`.
+
+Los logs salen por stdout: un agente como Grafana Alloy o el del entorno los recoge y los lleva a Loki u
+otra plataforma, donde `trace_id` enlaza cada línea con su traza.
 
 ## Con Gin o chi
 

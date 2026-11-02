@@ -10,10 +10,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -741,18 +743,171 @@ func TestAbortedResponseIsStillRecorded(t *testing.T) {
 
 // The tests below replace slog's and log's process-wide defaults, so they cannot run in parallel.
 
-func restoreLogDefaults(t *testing.T) {
+// The process-wide defaults before any test changes them.
+var (
+	initialSlogDefault    = slog.Default()
+	initialTracerProvider = otel.GetTracerProvider()
+)
+
+// resetGlobals starts a test from the state of a fresh process, which earlier tests may have changed.
+func resetGlobals(t *testing.T) {
 	t.Helper()
-	prev, writer, flags := slog.Default(), log.Writer(), log.Flags()
-	t.Cleanup(func() {
-		slog.SetDefault(prev)
-		log.SetOutput(writer)
-		log.SetFlags(flags)
+	reset := func() {
+		slog.SetDefault(initialSlogDefault)
+		log.SetOutput(os.Stderr)
+		log.SetFlags(log.LstdFlags)
+		otel.SetTracerProvider(initialTracerProvider)
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// captureStdout returns what is written to os.Stdout until the returned func is called.
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = original })
+	return func() string {
+		_ = w.Close()
+		os.Stdout = original
+		out, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+}
+
+func decodeLines(t *testing.T, out string) map[string]map[string]any {
+	t.Helper()
+	records := make(map[string]map[string]any)
+	for line := range strings.Lines(out) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		records[rec["msg"].(string)] = rec
+	}
+	return records
+}
+
+func TestDefaultLogFields(t *testing.T) {
+	resetGlobals(t)
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.version=1.4.2")
+	t.Setenv("OTEL_SERVICE_NAME", "from-env")
+	stop := captureStdout(t)
+
+	ln := listenLocal(t)
+	app := atlas.New(atlas.WithListener(ln), atlas.WithServiceName("from-code"))
+	app.Get("/work/{id}", func(w http.ResponseWriter, r *http.Request) error {
+		slog.InfoContext(r.Context(), "working")
+		slog.Info("no context")
+		return atlas.JSON(w, http.StatusOK, "ok")
 	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	url := "http://" + ln.Addr().String()
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		resp, err := http.Get(url + "/ping")
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("service never answered: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	got := get(t, url+"/work/42") // no traceparent: the trace must start here
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	records := decodeLines(t, stop())
+
+	for msg, rec := range records {
+		if rec["service"] != "from-env" || rec["version"] != "1.4.2" {
+			t.Errorf("%q: service = %v, version = %v", msg, rec["service"], rec["version"])
+		}
+		if _, err := time.Parse(time.RFC3339Nano, rec["time"].(string)); err != nil {
+			t.Errorf("%q: time: %v", msg, err)
+		}
+		if rec["level"] == nil {
+			t.Errorf("%q has no level", msg)
+		}
+	}
+	working, access := records["working"], records["request"]
+	if working == nil || access == nil {
+		t.Fatalf("missing records: %v", records)
+	}
+	if working["request_id"] != got.header.Get("X-Request-ID") {
+		t.Errorf("request_id = %v, want %s", working["request_id"], got.header.Get("X-Request-ID"))
+	}
+	if id, _ := working["trace_id"].(string); len(id) != 32 {
+		t.Errorf("trace_id = %q, want a generated one", id)
+	}
+	if id, _ := working["span_id"].(string); len(id) != 16 {
+		t.Errorf("span_id = %q, want a generated one", id)
+	}
+	if access["trace_id"] != working["trace_id"] || access["request_id"] != working["request_id"] {
+		t.Errorf("access log IDs differ from the handler's: %v vs %v", access, working)
+	}
+	if access["route"] != "/work/{id}" || access["path"] != "/work/42" || access["method"] != "GET" {
+		t.Errorf("access log = %v", access)
+	}
+	if ms, ok := access["duration_ms"].(float64); !ok || ms < 0 {
+		t.Errorf("duration_ms = %v", access["duration_ms"])
+	}
+	if rec := records["no context"]; rec["request_id"] != nil || rec["trace_id"] != nil {
+		t.Errorf("a record without a context cannot carry IDs: %v", rec)
+	}
+}
+
+func TestSecondRunStillGeneratesTraceIDs(t *testing.T) {
+	resetGlobals(t)
+	sink := newLogSink()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
+		slog.InfoContext(r.Context(), "working")
+	})
+
+	first := startWith(t, mux)
+	if err := first.stop(); err != nil {
+		t.Fatal(err)
+	}
+	second := startWith(t, mux)
+	get(t, second.url+"/work")
+
+	logs := sink.records(t, "working")
+	if len(logs) != 1 || logs[0]["trace_id"] == nil {
+		t.Errorf("working logs = %v, want a generated trace_id", logs)
+	}
+}
+
+func TestApplicationGlobalTracerProviderIsKept(t *testing.T) {
+	resetGlobals(t)
+	spans := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+	svc := startWith(t, helloMux())
+	get(t, svc.url+"/hello")
+
+	if len(spans.Ended()) != 1 {
+		t.Errorf("spans in the application's provider = %d, want 1", len(spans.Ended()))
+	}
 }
 
 func TestHandlerLogsCarryRequestAndTraceIDs(t *testing.T) {
-	restoreLogDefaults(t)
+	resetGlobals(t)
 	sink := newLogSink()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))
 	mux := http.NewServeMux()
@@ -779,7 +934,7 @@ func TestHandlerLogsCarryRequestAndTraceIDs(t *testing.T) {
 }
 
 func TestDefaultLoggerIsWrappedOnce(t *testing.T) {
-	restoreLogDefaults(t)
+	resetGlobals(t)
 	sink := newLogSink()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))
 	mux := http.NewServeMux()
@@ -809,7 +964,7 @@ func TestDefaultLoggerIsWrappedOnce(t *testing.T) {
 }
 
 func TestWithoutGlobalTelemetryKeepsSlogDefault(t *testing.T) {
-	restoreLogDefaults(t)
+	resetGlobals(t)
 	before := slog.Default()
 	svc := start(t, helloMux())
 	get(t, svc.url+"/hello")
@@ -818,31 +973,47 @@ func TestWithoutGlobalTelemetryKeepsSlogDefault(t *testing.T) {
 	}
 }
 
-func TestDefaultLoggerInstalledOnlyWithoutOwnLogger(t *testing.T) {
-	restoreLogDefaults(t)
-	before := slog.Default()
+func TestOwnLoggerBecomesTheDefaultWithoutTouchingPackageLog(t *testing.T) {
+	resetGlobals(t)
+	var logOutput strings.Builder
+	log.SetOutput(&logOutput)
+	log.SetFlags(0)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
+		slog.InfoContext(r.Context(), "working")
+	})
+	svc := startWith(t, mux)
 
-	own := startWith(t, helloMux())
-	if err := own.stop(); err != nil {
-		t.Fatal(err)
+	got := get(t, svc.url+"/work")
+	logs := svc.logs.records(t, "working")
+	if len(logs) != 1 || logs[0]["request_id"] != got.header.Get("X-Request-ID") {
+		t.Errorf("working logs = %v, want one with the request ID in the logger of WithLogger", logs)
 	}
-	if slog.Default() != before {
-		t.Error("WithLogger replaced slog's initial default logger")
+	log.Print("through log")
+	if logOutput.String() != "through log\n" {
+		t.Errorf("package log wrote %q, want its own output kept", logOutput.String())
 	}
+	if len(svc.logs.records(t, "through log")) != 0 {
+		t.Error("package log was redirected to the logger")
+	}
+}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- atlas.Run(ctx, helloMux(), atlas.WithListener(listenLocal(t))) }()
-	deadline := time.Now().Add(waitTimeout)
-	for slog.Default() == before && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+func TestAccessLogRoute(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orders/{id}", func(http.ResponseWriter, *http.Request) {})
+	mux.HandleFunc("/any/{$}", func(http.ResponseWriter, *http.Request) {})
+	svc := start(t, mux)
+	for _, target := range []string{"/orders/1", "/any/", "/nope"} {
+		get(t, svc.url+target)
 	}
-	if slog.Default() == before {
-		t.Error("Run without a logger did not install its own as slog's default")
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Errorf("Run() = %v, want nil", err)
+	svc.logs.waitFor(t, `"path":"/nope"`)
+
+	want := map[string]any{"/orders/1": "/orders/{id}", "/any/": "/any/", "/nope": nil}
+	for _, rec := range svc.logs.records(t, "request") {
+		if path := rec["path"].(string); rec["route"] != want[path] {
+			t.Errorf("%s: route = %v, want %v", path, rec["route"], want[path])
+		}
 	}
 }
 
@@ -857,7 +1028,7 @@ func TestLoggerWritingThroughPackageLogDoesNotDeadlock(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			restoreLogDefaults(t)
+			resetGlobals(t)
 			buf := newLogSink()
 			log.SetOutput(buf)
 			log.SetFlags(0)

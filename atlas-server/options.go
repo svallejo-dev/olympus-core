@@ -15,6 +15,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -75,8 +77,24 @@ func newConfig(opts []Option) config {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if !cfg.ownLogger {
+		cfg.logger = cfg.logger.With(serviceAttrs(cfg.serviceName)...)
+	}
 	cfg.logger = slog.New(withContextIDs(cfg.logger.Handler()))
 	return cfg
+}
+
+// serviceAttrs identifies the service on every line, with the same precedence as its telemetry: the environment wins.
+func serviceAttrs(name string) []any {
+	env := resource.Environment().Set()
+	if v, ok := env.Value(semconv.ServiceNameKey); ok {
+		name = v.AsString()
+	}
+	attrs := []any{"service", name}
+	if v, ok := env.Value(semconv.ServiceVersionKey); ok {
+		attrs = append(attrs, "version", v.AsString())
+	}
+	return attrs
 }
 
 // validate reports every invalid option at once, so Run fails before it listens.
@@ -190,7 +208,7 @@ func WithAdminListener(ln net.Listener) Option {
 	return func(c *config) { c.adminListener = ln }
 }
 
-// WithLogger sets the logger for atlas' lifecycle, access and panic logs, adding each request's IDs; it does not change slog's default. nil keeps the JSON stdout default.
+// WithLogger sets the logger for atlas' logs, adding each request's IDs but not the service fields of the default logger; nil keeps the JSON stdout default.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *config) {
 		if logger != nil {
@@ -252,12 +270,12 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 	return func(c *config) { c.meterProvider = mp }
 }
 
-// WithTracerProvider replaces the tracer provider configured from the OTLP environment variables.
+// WithTracerProvider replaces the tracer provider atlas creates, which exports only if the OTLP environment variables are set.
 func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(c *config) { c.tracerProvider = tp }
 }
 
-// WithoutGlobalTelemetry stops Run from setting the global OpenTelemetry providers and propagator and slog's default logger.
+// WithoutGlobalTelemetry stops Run from reading or setting the global OpenTelemetry providers and propagator and from setting slog's default logger.
 func WithoutGlobalTelemetry() Option {
 	return func(c *config) { c.globalTelemetry = false }
 }

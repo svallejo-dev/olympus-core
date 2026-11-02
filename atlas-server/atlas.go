@@ -133,7 +133,9 @@ func (s *service) logListening(ctx context.Context) {
 	if len(s.servers) > 1 {
 		attrs = append(attrs, "admin_addr", s.servers[1].listener.Addr().String())
 	}
-	attrs = append(attrs, "service", s.tel.serviceName)
+	if s.cfg.ownLogger {
+		attrs = append(attrs, "service", s.tel.serviceName)
+	}
 	s.cfg.logger.InfoContext(ctx, "listening", attrs...)
 }
 
