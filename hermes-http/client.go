@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"golang.org/x/time/rate"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Client is safe for concurrent use and immutable after New; its only state is an in-memory circuit breaker per scheme, host and port.
@@ -22,6 +22,8 @@ type Client struct {
 	// client has no Jar, so no session is kept between requests; its Timeout is the total timeout.
 	client           *http.Client
 	maxResponseBytes int64
+	// cfg is what Endpoint derives from; nothing changes it after the Client is built.
+	cfg config
 }
 
 // New returns a Client for the absolute http or https baseURL; it fails on an invalid URL or option.
@@ -30,18 +32,40 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := newConfig(opts)
+	return newClient(base, newConfig(opts))
+}
+
+// Endpoint returns a Client with the same base URL and configuration, except for opts, under a fixed name that labels its telemetry; create it once at startup and reuse it.
+// A breaker, rate limit or concurrency cap passed in opts has its own state; one left out is shared with c. Connections are always shared unless opts include WithTransport.
+func (c *Client) Endpoint(name string, opts ...Option) (*Client, error) {
+	if name == "" {
+		return nil, errors.New("hermes: Endpoint: empty name")
+	}
+	cfg := c.cfg
+	cfg.name, cfg.headers = name, c.cfg.headers.Clone()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return newClient(c.base, cfg)
+}
+
+func newClient(base *url.URL, cfg config) (*Client, error) {
 	if err := errors.Join(cfg.errs...); err != nil {
 		return nil, err
 	}
-	tel, err := newTelemetry(cfg.meterProvider)
+	tel, err := newTelemetry(cfg.meterProvider, cfg.name)
 	if err != nil {
 		return nil, err
 	}
+	if cfg.transport == nil {
+		cfg.transport = defaultTransport()
+	}
+	transport := cfg.pipeline(tel)
 	return &Client{
 		base:             base,
-		client:           &http.Client{Transport: cfg.pipeline(tel), Timeout: cfg.timeout},
+		client:           &http.Client{Transport: transport, Timeout: cfg.timeout},
 		maxResponseBytes: cfg.maxResponseBytes,
+		cfg:              cfg,
 	}, nil
 }
 
@@ -65,28 +89,27 @@ func (c *config) pipeline(tel *telemetry) *pipelineTransport {
 		logger = func() *slog.Logger { return l }
 	}
 
-	base := c.transport
-	if base == nil {
-		base = defaultTransport()
-	}
-	var rt http.RoundTripper = nonNilBodyTransport{next: base}
+	var rt http.RoundTripper = nonNilBodyTransport{next: c.transport}
 	if len(c.headers) > 0 || c.bearerToken != nil {
 		rt = &headerTransport{next: rt, headers: c.headers, token: c.bearerToken}
 	}
 	if c.breaker != nil {
-		rt = &breakerTransport{next: rt, policy: *c.breaker, logger: logger, tel: tel, byHost: make(map[string]*hostBreaker)}
+		if c.breakers == nil {
+			c.breakers = &breakerGroup{policy: *c.breaker, logger: logger, tel: tel, byHost: make(map[string]*hostBreaker)}
+		}
+		rt = &breakerTransport{next: rt, group: c.breakers}
 	}
 	if c.attemptTimeout > 0 {
 		rt = &attemptTimeoutTransport{next: rt, timeout: c.attemptTimeout}
 	}
-	if c.rateLimit > 0 {
-		rt = &rateLimitTransport{next: rt, limiter: rate.NewLimiter(c.rateLimit, c.rateBurst)}
+	if c.limiter != nil {
+		rt = &rateLimitTransport{next: rt, limiter: c.limiter}
 	}
 	if c.retry != nil && c.retry.MaxAttempts > 1 {
 		rt = &retryTransport{next: rt, policy: *c.retry, logger: logger, tel: tel}
 	}
-	if c.maxConcurrent > 0 {
-		rt = &bulkheadTransport{next: rt, slots: make(chan struct{}, c.maxConcurrent)}
+	if c.slots != nil {
+		rt = &bulkheadTransport{next: rt, slots: c.slots}
 	}
 
 	var otelOpts []otelhttp.Option
@@ -99,7 +122,14 @@ func (c *config) pipeline(tel *telemetry) *pipelineTransport {
 	if c.propagators != nil {
 		otelOpts = append(otelOpts, otelhttp.WithPropagators(c.propagators))
 	}
-	return &pipelineTransport{RoundTripper: otelhttp.NewTransport(rt, otelOpts...), base: base}
+	if c.name != "" {
+		otelOpts = append(otelOpts, otelhttp.WithSpanOptions(trace.WithAttributes(endpointKey.String(c.name))))
+	}
+	rt = otelhttp.NewTransport(rt, otelOpts...)
+	if c.name != "" {
+		rt = &endpointLabelTransport{next: rt, attr: endpointKey.String(c.name)}
+	}
+	return &pipelineTransport{RoundTripper: rt, base: c.transport}
 }
 
 // pipelineTransport forwards CloseIdleConnections to the base transport, which otelhttp's Transport does not.
@@ -179,7 +209,7 @@ func (c *Client) HTTPClient() *http.Client {
 	return &http.Client{Transport: c.client.Transport, Timeout: c.client.Timeout}
 }
 
-// CloseIdleConnections closes the idle connections of the base transport, when it supports that.
+// CloseIdleConnections closes the idle connections of the base transport, shared with the Client's endpoints, when it supports that.
 func (c *Client) CloseIdleConnections() {
 	c.client.CloseIdleConnections()
 }

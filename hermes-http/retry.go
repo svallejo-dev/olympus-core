@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// RetryPolicy configures retries with exponential backoff and full jitter; zero fields take the defaults.
+// RetryPolicy configures retries with exponential backoff and full jitter; WithRetry keeps the current value of its zero fields.
 type RetryPolicy struct {
 	// MaxAttempts counts the first attempt too (default 3).
 	MaxAttempts int
@@ -48,23 +49,29 @@ func (p RetryPolicy) validate() error {
 }
 
 func (p RetryPolicy) withDefaults() RetryPolicy {
-	if p.MaxAttempts == 0 {
-		p.MaxAttempts = 3
-	}
-	if p.InitialBackoff == 0 {
-		p.InitialBackoff = 100 * time.Millisecond
-	}
-	if p.MaxBackoff == 0 {
-		p.MaxBackoff = 2 * time.Second
-	}
-	if p.MaxRetryAfter == 0 {
-		p.MaxRetryAfter = 30 * time.Second
-	}
-	if p.IdempotencyHeader == "" {
-		p.IdempotencyHeader = defaultIdempotencyHeader
+	return p.over(RetryPolicy{
+		MaxAttempts:       3,
+		InitialBackoff:    100 * time.Millisecond,
+		MaxBackoff:        2 * time.Second,
+		MaxRetryAfter:     30 * time.Second,
+		IdempotencyHeader: defaultIdempotencyHeader,
+		ShouldRetry:       defaultShouldRetry,
+	})
+}
+
+// over fills the zero fields of p from base.
+func (p RetryPolicy) over(base RetryPolicy) RetryPolicy {
+	p.MaxAttempts = cmp.Or(p.MaxAttempts, base.MaxAttempts)
+	p.InitialBackoff = cmp.Or(p.InitialBackoff, base.InitialBackoff)
+	p.MaxBackoff = cmp.Or(p.MaxBackoff, base.MaxBackoff)
+	p.MaxRetryAfter = cmp.Or(p.MaxRetryAfter, base.MaxRetryAfter)
+	p.RetryNonIdempotent = cmp.Or(p.RetryNonIdempotent, base.RetryNonIdempotent)
+	p.IdempotencyHeader = cmp.Or(p.IdempotencyHeader, base.IdempotencyHeader)
+	if p.IsIdempotent == nil {
+		p.IsIdempotent = base.IsIdempotent
 	}
 	if p.ShouldRetry == nil {
-		p.ShouldRetry = defaultShouldRetry
+		p.ShouldRetry = base.ShouldRetry
 	}
 	return p
 }
@@ -176,7 +183,7 @@ func neverRetried(err error) bool {
 }
 
 func (t *retryTransport) record(ctx context.Context, req *http.Request, attempt int, reason string, wait time.Duration) {
-	attrs := append(serverAttributes(req.URL), retryReasonKey.String(reason))
+	attrs := append(t.tel.attributes(req.URL), retryReasonKey.String(reason))
 	t.tel.retries.Add(ctx, 1, metric.WithAttributes(attrs...))
 	trace.SpanFromContext(ctx).AddEvent("hermes.retry", trace.WithAttributes(
 		semconv.HTTPRequestResendCount(attempt),

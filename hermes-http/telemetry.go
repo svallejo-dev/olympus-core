@@ -2,9 +2,11 @@ package hermes
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -13,15 +15,19 @@ import (
 
 const instrumentationName = "github.com/svallejo-dev/olympus-core/hermes-http"
 
-const retryReasonKey = attribute.Key("hermes.retry.reason")
+const (
+	retryReasonKey = attribute.Key("hermes.retry.reason")
+	endpointKey    = attribute.Key("hermes.endpoint")
+)
 
 type telemetry struct {
+	endpoint     string
 	retries      metric.Int64Counter
 	rejections   metric.Int64Counter
 	breakerState metric.Int64Gauge
 }
 
-func newTelemetry(mp metric.MeterProvider) (*telemetry, error) {
+func newTelemetry(mp metric.MeterProvider, endpoint string) (*telemetry, error) {
 	if mp == nil {
 		mp = otel.GetMeterProvider()
 	}
@@ -46,11 +52,39 @@ func newTelemetry(mp metric.MeterProvider) (*telemetry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hermes: create breaker state gauge: %w", err)
 	}
-	return &telemetry{retries: retries, rejections: rejections, breakerState: state}, nil
+	return &telemetry{endpoint: endpoint, retries: retries, rejections: rejections, breakerState: state}, nil
 }
 
-func serverAttributes(u *url.URL) []attribute.KeyValue {
-	return []attribute.KeyValue{semconv.ServerAddress(u.Hostname()), semconv.ServerPort(port(u))}
+// attributes identify a host and, on an Endpoint, which of the Client's breakers and policies acted on it.
+func (t *telemetry) attributes(u *url.URL) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{semconv.ServerAddress(u.Hostname()), semconv.ServerPort(port(u))}
+	if t.endpoint != "" {
+		attrs = append(attrs, endpointKey.String(t.endpoint))
+	}
+	return attrs
+}
+
+func (t *telemetry) breakerName(key string) string {
+	if t.endpoint == "" {
+		return key
+	}
+	return t.endpoint + " " + key
+}
+
+// endpointLabelTransport adds the endpoint to the http.client.* metrics, which otelhttp reads from a labeler in the context.
+type endpointLabelTransport struct {
+	next http.RoundTripper
+	attr attribute.KeyValue
+}
+
+func (t *endpointLabelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// A labeler of its own: otelhttp shares the one in the context with nested calls, such as the bearer token's.
+	labeler := &otelhttp.Labeler{}
+	if outer, ok := otelhttp.ClientLabelerFromContext(req.Context()); ok {
+		labeler.Add(outer.Get()...)
+	}
+	labeler.Add(t.attr)
+	return t.next.RoundTrip(req.WithContext(otelhttp.ContextWithClientLabeler(req.Context(), labeler)))
 }
 
 // port returns the URL's port, or the scheme's default when it has none.

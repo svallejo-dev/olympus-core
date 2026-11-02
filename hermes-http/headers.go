@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"slices"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type headerTransport struct {
@@ -23,8 +25,9 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	if t.token != nil && out.Header.Get("Authorization") == "" {
-		// The token call is a request of its own, so it must not inherit this one's Idempotent mark.
-		token, err := t.token(context.WithValue(req.Context(), idempotentKey{}, nil))
+		// The token call is a request of its own, so it must not inherit this one's Idempotent mark or metric labels.
+		ctx := otelhttp.ContextWithClientLabeler(context.WithValue(req.Context(), idempotentKey{}, nil), &otelhttp.Labeler{})
+		token, err := t.token(ctx)
 		if err != nil {
 			closeRequestBody(req)
 			return nil, &tokenError{err: err}

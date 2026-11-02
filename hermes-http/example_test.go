@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"time"
 
 	"github.com/svallejo-dev/olympus-core/hermes-http"
@@ -97,4 +98,35 @@ func ExampleDecode() {
 		log.Fatal(err)
 	}
 	fmt.Println(users, resp.Header.Get("Link"))
+}
+
+func ExampleClient_Endpoint() {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c, err := hermes.New(srv.URL, hermes.WithoutCircuitBreaker(), hermes.WithRetry(hermes.RetryPolicy{
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+	}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	reports, err := c.Endpoint("reports", hermes.WithoutRetry())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	type report struct{}
+	_, _ = hermes.Get[report](context.Background(), reports, "/reports/1")
+	fmt.Println("reports:", hits.Swap(0))
+
+	_, _ = hermes.Get[report](context.Background(), c, "/orders/1")
+	fmt.Println("orders:", hits.Load())
+	// Output:
+	// reports: 1
+	// orders: 3
 }

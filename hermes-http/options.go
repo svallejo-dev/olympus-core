@@ -24,13 +24,14 @@ const (
 type Option func(*config)
 
 type config struct {
+	name             string
 	timeout          time.Duration
 	attemptTimeout   time.Duration
 	retry            *RetryPolicy
 	breaker          *BreakerPolicy
-	maxConcurrent    int
-	rateLimit        rate.Limit
-	rateBurst        int
+	breakers         *breakerGroup
+	slots            chan struct{}
+	limiter          *rate.Limiter
 	headers          http.Header
 	bearerToken      func(context.Context) (string, error)
 	transport        http.RoundTripper
@@ -84,52 +85,63 @@ func WithAttemptTimeout(d time.Duration) Option {
 	}
 }
 
-// WithRetry replaces the retry policy; zero fields of p take the defaults documented on RetryPolicy.
+// WithRetry changes the non-zero fields of p and keeps the rest: on an Endpoint, the values of its parent; otherwise the defaults documented on RetryPolicy.
 func WithRetry(p RetryPolicy) Option {
 	return func(c *config) {
 		if err := p.validate(); err != nil {
 			c.errs = append(c.errs, err)
 			return
 		}
+		if c.retry != nil {
+			p = p.over(*c.retry)
+		}
 		p = p.withDefaults()
 		c.retry = &p
 	}
 }
 
-// WithoutRetry sends every request exactly once.
+// WithoutRetry sends every request exactly once; a WithRetry after it starts again from the defaults, which also clears inherited fields.
 func WithoutRetry() Option {
 	return func(c *config) { c.retry = nil }
 }
 
-// WithCircuitBreaker replaces the breaker policy; zero fields of p take the defaults documented on BreakerPolicy.
+// WithCircuitBreaker changes the non-zero fields of p and keeps the rest, as WithRetry does; on an Endpoint it also gives it breakers of its own.
 func WithCircuitBreaker(p BreakerPolicy) Option {
 	return func(c *config) {
 		if err := p.validate(); err != nil {
 			c.errs = append(c.errs, err)
 			return
 		}
+		if c.breaker != nil {
+			p = p.over(*c.breaker)
+		}
 		p = p.withDefaults()
-		c.breaker = &p
+		c.breaker, c.breakers = &p, nil
 	}
 }
 
-// WithoutCircuitBreaker disables the per-host circuit breakers.
+// WithoutCircuitBreaker disables the per-host circuit breakers; a WithCircuitBreaker after it starts again from the defaults.
 func WithoutCircuitBreaker() Option {
-	return func(c *config) { c.breaker = nil }
+	return func(c *config) { c.breaker, c.breakers = nil, nil }
 }
 
-// WithMaxConcurrent caps the calls in flight on this Client at n (a bulkhead); a call holds its slot until the response body is closed, and waiting honours the context.
+// WithMaxConcurrent caps the calls in flight at n (a bulkhead), across the Client and the endpoints that share its cap; a call holds its slot until the response body is closed, and waiting honours the context.
 func WithMaxConcurrent(n int) Option {
 	return func(c *config) {
 		if n < 1 {
 			c.fail("WithMaxConcurrent(%d): must be at least 1", n)
 			return
 		}
-		c.maxConcurrent = n
+		c.slots = make(chan struct{}, n)
 	}
 }
 
-// WithRateLimit paces attempts on this Client, retries included, to perSecond with bursts of up to burst; a wait that would outlast the deadline fails at once with an error wrapping context.DeadlineExceeded.
+// WithoutMaxConcurrent removes the cap on calls in flight, for an Endpoint that must not wait behind the others.
+func WithoutMaxConcurrent() Option {
+	return func(c *config) { c.slots = nil }
+}
+
+// WithRateLimit paces attempts, retries included, to perSecond with bursts of up to burst, across the Client and the endpoints that share its limit; a wait that would outlast the deadline fails at once with an error wrapping context.DeadlineExceeded.
 func WithRateLimit(perSecond float64, burst int) Option {
 	return func(c *config) {
 		if perSecond <= 0 || math.IsNaN(perSecond) || math.IsInf(perSecond, 0) {
@@ -140,8 +152,13 @@ func WithRateLimit(perSecond float64, burst int) Option {
 			c.fail("WithRateLimit(%v, %d): burst must be at least 1", perSecond, burst)
 			return
 		}
-		c.rateLimit, c.rateBurst = rate.Limit(perSecond), burst
+		c.limiter = rate.NewLimiter(rate.Limit(perSecond), burst)
 	}
+}
+
+// WithoutRateLimit removes the rate limit, for an Endpoint that must not wait behind the others.
+func WithoutRateLimit() Option {
+	return func(c *config) { c.limiter = nil }
 }
 
 // WithHeader sets a header on every request unless the request already carries that header.

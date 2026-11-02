@@ -139,9 +139,9 @@ puede formar parte de una interfaz: la interfaz que uses en tus tests debe ser l
 | Tamaño máximo de respuesta JSON | 10 MiB | `WithMaxResponseBytes(n)` |
 | Transporte base | clon de `http.DefaultTransport`, 100 conexiones idle por host | `WithTransport(rt)` |
 
-Los campos a cero de `RetryPolicy` y `BreakerPolicy` toman el valor por defecto, así que solo
-escribes los que cambias. Bulkhead y rate limit son por `Client` (todas las peticiones, todos
-los hosts) y la espera respeta el `ctx`. El bulkhead cuenta llamadas: una llamada ocupa su hueco
+Los campos a cero de `RetryPolicy` y `BreakerPolicy` conservan el valor actual, que de entrada es el
+de esta tabla, así que solo escribes los que cambias. Bulkhead y rate limit cubren todas las peticiones y todos los hosts del
+`Client` y de los [endpoints](#configuración-por-endpoint) que los compartan, y la espera respeta el `ctx`. El bulkhead cuenta llamadas: una llamada ocupa su hueco
 durante todos sus reintentos hasta que se cierra el body. El rate limit marca el ritmo de los
 **intentos**: cada reintento espera su propio token, y si el token llegaría después del deadline
 falla al instante con un error que envuelve `context.DeadlineExceeded`, sin reintentar.
@@ -149,6 +149,78 @@ falla al instante con un error que envuelve `context.DeadlineExceeded`, sin rein
 El timeout total es el `Timeout` del `http.Client` interno (y del que devuelve `HTTPClient()`):
 cubre la llamada lógica entera, con reintentos, redirecciones y lectura del body. El timeout de
 intento cuelga del contexto de la petición, así que nunca dura más que el deadline restante.
+
+## Configuración por endpoint
+
+No todos los endpoints merecen lo mismo. `c.Endpoint` deriva un `Client` con la misma base URL y
+configuración, cambiando solo lo que le pases. Acepta las mismas opciones que `hermes.New`:
+
+```go
+c, err := hermes.New("https://api.example.com/v1", hermes.WithBearerToken(tokens.Get))
+if err != nil {
+	return err
+}
+
+// Camino crítico: más intentos, y un breaker propio al que no le afectan los fallos del resto.
+payments, err := c.Endpoint("payments",
+	hermes.WithRetry(hermes.RetryPolicy{MaxAttempts: 5, MaxBackoff: 5 * time.Second}),
+	hermes.WithCircuitBreaker(hermes.BreakerPolicy{ConsecutiveFailures: 10, OpenTimeout: 5 * time.Second}),
+	hermes.WithAttemptTimeout(3*time.Second),
+)
+if err != nil {
+	return err
+}
+
+// Secundario y lento: sin reintentos, con más tiempo y limitado para no saturar la API.
+reports, err := c.Endpoint("reports",
+	hermes.WithoutRetry(),
+	hermes.WithTimeout(2*time.Minute),
+	hermes.WithAttemptTimeout(time.Minute),
+	hermes.WithRateLimit(5, 1),
+)
+if err != nil {
+	return err
+}
+
+charge, err := hermes.Post[Charge](ctx, payments, "/payments", in, hermes.IdempotencyKey(key))
+report, err := hermes.Get[Report](ctx, reports, "/reports/"+id)
+```
+
+Lo normal es crearlos al arrancar y guardarlos en el adaptador de esa API, de modo que cada método
+use el suyo. Un mismo `Endpoint` puede servir a varias rutas. También funciona con `Do`, con `Decode`
+y con `HTTPClient()`.
+
+| Ajuste | Si no lo pasas | Si lo pasas |
+|---|---|---|
+| Timeouts, cabeceras, token, tamaño máximo | Se copia del padre | Sustituye la copia |
+| `WithRetry` | Se copia del padre | Cambia los campos que escribas; el resto se hereda del padre |
+| `WithCircuitBreaker` | **Comparte el breaker** del padre | **Breaker propio**, independiente del padre; los campos que no escribas se heredan |
+| Rate limit, bulkhead | **Comparte** los tokens y los huecos del padre | **Límite propio**, independiente del padre |
+| Conexiones | Comparte el pool del padre | Con `WithTransport`, el transporte que indiques |
+
+Para quitar uno de los compartidos: `WithoutCircuitBreaker()`, `WithoutRateLimit()` o
+`WithoutMaxConcurrent()`.
+
+Con `WithRetry` y `WithCircuitBreaker` solo escribes lo que cambia. Si el padre tiene
+`MaxBackoff: 10 * time.Second`, `RetryPolicy{MaxAttempts: 6}` conserva esos 10 s, y también su
+`IdempotencyHeader`, `IsIdempotent` y `ShouldRetry`. Un campo a cero no puede apagar lo heredado. Para
+partir de los valores por defecto de hermes, pon el `Without` antes:
+
+```go
+strict, err := c.Endpoint("strict", hermes.WithoutRetry(), hermes.WithRetry(hermes.RetryPolicy{MaxAttempts: 2}))
+```
+
+Dos cosas a tener en cuenta:
+
+- **Aislar un endpoint exige pasarle su breaker.** Sin `WithCircuitBreaker`, los fallos de
+  cualquier endpoint que comparta breaker pueden abrirlo para todos. Si el host cae entero, cada
+  breaker propio tiene que abrirse por su cuenta.
+- **Un rate limit propio no consume el del padre.** Si la API impone una cuota global, la suma de
+  los límites de tus endpoints no debe superarla.
+
+El nombre aparece como `hermes.endpoint` en la telemetría, así que debe ser fijo y único: un
+nombre con IDs dispara la cardinalidad de las métricas, y dos breakers propios con el mismo nombre
+pisan su serie de estado.
 
 ## Cuándo se reintenta
 
@@ -219,7 +291,7 @@ tienen estado que merezca la pena, y conserva los abiertos y semiabiertos.
 inmutable tras `New`, así que un `Client` se comparte entre goroutines sin sincronización adicional. El
 único estado es el inherente a la resiliencia: los breakers por host (y los contadores del
 bulkhead y del rate limiter), en memoria y por proceso. No se comparte entre réplicas ni
-sobrevive a un reinicio. Crea un `Client` por API de destino y reutilízalo.
+sobrevive a un reinicio. Crea un `Client` por API de destino, deriva sus [endpoints](#configuración-por-endpoint) y reutilízalos.
 
 ## Telemetría
 
@@ -237,6 +309,11 @@ Cuando una llamada falla sin respuesta, `error.type` en `http.client.request.dur
 motivo: `net.OpError` para un fallo de red, y tipos propios de hermes para los demás
 (`...hermes-http.circuitOpenError`, `attemptTimeoutError`, `rateLimitError`, `concurrencyError`,
 `retryWaitError`).
+
+Un `Client` creado con `c.Endpoint` añade `hermes.endpoint` a `hermes.client.retries`, a
+`http.client.request.duration` y a su span, así que puedes separar la latencia y los fallos del
+camino crítico. Las métricas del breaker llevan el nombre del dueño del breaker: el del endpoint
+si tiene uno propio, y ninguno si comparte el del `Client` raíz.
 
 gobreaker cambia de estado de forma perezosa: el gauge pasa de abierto a semiabierto cuando llega
 la siguiente petición tras `OpenTimeout`, no en el instante en que vence. Un host sin tráfico se
