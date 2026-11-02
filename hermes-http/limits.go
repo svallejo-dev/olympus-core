@@ -22,9 +22,9 @@ func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if err := t.limiter.Wait(ctx); err != nil {
 		closeRequestBody(req)
 		if ctx.Err() == nil {
-			return nil, errRateLimitDeadline
+			return nil, rateLimitError{wrapped{errRateLimitDeadline}}
 		}
-		return nil, fmt.Errorf("hermes: rate limit: %w", err)
+		return nil, rateLimitError{wrapped{fmt.Errorf("hermes: rate limit: %w", err)}}
 	}
 	return t.next.RoundTrip(req)
 }
@@ -41,7 +41,7 @@ func (t *bulkheadTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	case t.slots <- struct{}{}:
 	case <-ctx.Done():
 		closeRequestBody(req)
-		return nil, fmt.Errorf("hermes: wait for concurrency slot: %w", context.Cause(ctx))
+		return nil, concurrencyError{wrapped{fmt.Errorf("hermes: wait for concurrency slot: %w", context.Cause(ctx))}}
 	}
 	release := func() { <-t.slots }
 	resp, err := t.next.RoundTrip(req)

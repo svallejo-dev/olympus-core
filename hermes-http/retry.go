@@ -27,12 +27,18 @@ type RetryPolicy struct {
 	MaxBackoff time.Duration
 	// MaxRetryAfter is the longest Retry-After honoured (default 30s); a longer one stops retrying and returns that response.
 	MaxRetryAfter time.Duration
-	// RetryNonIdempotent also retries POST, PATCH and other methods sent without an Idempotency-Key.
+	// RetryNonIdempotent also retries every POST, PATCH and other method that no rule below marks as idempotent.
 	RetryNonIdempotent bool
+	// IdempotencyHeader names the header whose presence makes a POST or PATCH retryable (default Idempotency-Key).
+	IdempotencyHeader string
+	// IsIdempotent adds a rule for POST, PATCH and other methods, e.g. by path or query; it must not consume the body.
+	IsIdempotent func(req *http.Request) bool
 	// ShouldRetry replaces the default classification (transport errors and 429, 502, 503, 504); resp is nil when err is not.
 	// Breaker rejections, bearer-token failures and rate limit waits beyond the deadline are never retried, whatever it returns.
 	ShouldRetry func(resp *http.Response, err error) bool
 }
+
+const defaultIdempotencyHeader = "Idempotency-Key"
 
 func (p RetryPolicy) validate() error {
 	if p.MaxAttempts < 0 || p.InitialBackoff < 0 || p.MaxBackoff < 0 || p.MaxRetryAfter < 0 {
@@ -53,6 +59,9 @@ func (p RetryPolicy) withDefaults() RetryPolicy {
 	}
 	if p.MaxRetryAfter == 0 {
 		p.MaxRetryAfter = 30 * time.Second
+	}
+	if p.IdempotencyHeader == "" {
+		p.IdempotencyHeader = defaultIdempotencyHeader
 	}
 	if p.ShouldRetry == nil {
 		p.ShouldRetry = defaultShouldRetry
@@ -115,7 +124,7 @@ type retryTransport struct {
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if (!t.policy.RetryNonIdempotent && !idempotent(req)) || !rewindable(req) {
+	if !t.policy.allows(req) || !rewindable(req) {
 		return t.next.RoundTrip(req)
 	}
 	ctx := req.Context()
@@ -138,7 +147,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		t.record(ctx, req, attempt, reason, wait)
 		if err := sleep(ctx, wait); err != nil {
-			return nil, fmt.Errorf("hermes: wait to retry: %w", err)
+			return nil, retryWaitError{wrapped{fmt.Errorf("hermes: wait to retry: %w", err)}}
 		}
 		if attemptReq, err = rewind(req); err != nil {
 			return nil, err
@@ -178,12 +187,16 @@ func (t *retryTransport) record(ctx context.Context, req *http.Request, attempt 
 		"method", req.Method, "url", redactURL(req.URL), "attempt", attempt+1, "reason", reason, "delay", wait)
 }
 
-func idempotent(req *http.Request) bool {
+// allows reports whether req is safe to send more than once.
+func (p RetryPolicy) allows(req *http.Request) bool {
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut, http.MethodDelete, http.MethodTrace:
 		return true
 	}
-	return req.Header.Get("Idempotency-Key") != ""
+	return p.RetryNonIdempotent ||
+		markedIdempotent(req.Context()) ||
+		req.Header.Get(p.IdempotencyHeader) != "" ||
+		(p.IsIdempotent != nil && p.IsIdempotent(req))
 }
 
 func hasBody(req *http.Request) bool {

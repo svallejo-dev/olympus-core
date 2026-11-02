@@ -47,7 +47,7 @@ if err != nil {
 }
 
 created, err := hermes.PostJSON[User](ctx, c, "/users", User{Name: "Ada"},
-	hermes.IdempotencyKey(requestID), // sin esta clave un POST no se reintenta
+	hermes.IdempotencyKey(requestID), // un POST solo se reintenta si se sabe idempotente
 	hermes.Query(url.Values{"notify": {"true"}}),
 )
 ```
@@ -98,7 +98,7 @@ Se reintenta una petición cuando se cumple **todo** esto:
 
 1. Quedan intentos y el `ctx` del llamador sigue vivo (cancelar corta en seco, sin reintentar).
 2. El método es idempotente (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`, `TRACE`), o la petición
-   lleva cabecera `Idempotency-Key`, o la política tiene `RetryNonIdempotent: true`.
+   cumple alguna regla de [idempotencia](#post-y-patch-idempotentes).
 3. El body se puede rebobinar: sin body, o con `req.GetBody` (lo pone `http.NewRequest` para
    `bytes.Reader`, `bytes.Buffer` y `strings.Reader`; los helpers JSON siempre lo cumplen).
 4. El resultado es reintentable: error de transporte (incluido un timeout de intento) o estado
@@ -110,6 +110,35 @@ Nunca se reintenta, diga lo que diga `ShouldRetry`, un rechazo del circuit break
 `RetryPolicy.MaxRetryAfter` (30 s por defecto) o la espera no cabe en el deadline restante, se
 para y se devuelve la última respuesta. Los bodies de las respuestas descartadas se drenan y
 cierran para reutilizar la conexión.
+
+## POST y PATCH idempotentes
+
+Un `POST` o `PATCH` no se reintenta salvo que le digas a hermes que es seguro, porque repetirlo
+podría duplicar la operación. Cada API marca la idempotencia a su manera, así que hay varias formas:
+
+| La API deduplica por... | Configuración |
+|---|---|
+| La cabecera `Idempotency-Key` | `hermes.IdempotencyKey(clave)` en la llamada |
+| Otra cabecera | `RetryPolicy{IdempotencyHeader: "X-Request-Id"}` y `hermes.Header("X-Request-Id", clave)` en la llamada. Sustituye a `Idempotency-Key` |
+| Una clave en el body o en la query, solo en algunas llamadas | `hermes.Idempotent()` en la llamada |
+| Una regla por ruta o por query | `RetryPolicy{IsIdempotent: func(r *http.Request) bool {...}}` |
+| Todo lo que expone ese cliente es seguro | `RetryPolicy{RetryNonIdempotent: true}` |
+
+```go
+payments, err := hermes.New(baseURL, hermes.WithRetry(hermes.RetryPolicy{
+	IsIdempotent: func(r *http.Request) bool {
+		return r.URL.Path == "/v1/payments" || r.URL.Query().Has("requestId")
+	},
+}))
+
+// La clave va en el body: cada reintento reenvía el mismo body, y por tanto la misma clave.
+charge, err := hermes.PostJSON[Charge](ctx, payments, "/v1/payments", Payment{Key: key, Amount: 100})
+```
+
+hermes no busca la clave ni comprueba que exista: solo decide si puede repetir la petición. Las
+cabeceras que pone `WithHeader` no cuentan para `IdempotencyHeader`, porque se añaden después de
+esa decisión. `hermes.Idempotent()` solo se aplica a los helpers JSON; con `Do` o `HTTPClient()`
+usa `IsIdempotent`, que no debe consumir el body.
 
 ## Circuit breaker
 
@@ -145,6 +174,11 @@ inyectada una vez y compartida por todos los intentos; cada reintento añade un 
 | `hermes.client.retries` | contador | `server.address`, `server.port`, `hermes.retry.reason` (`503`, `timeout`, `transport_error`…) |
 | `hermes.client.circuit_breaker.state` | gauge (0 cerrado, 1 semiabierto, 2 abierto) | `server.address`, `server.port` |
 | `hermes.client.circuit_breaker.rejections` | contador | `server.address`, `server.port` |
+
+Cuando una llamada falla sin respuesta, `error.type` en `http.client.request.duration` nombra el
+motivo: `net.OpError` para un fallo de red, y tipos propios de hermes para los demás
+(`...hermes-http.circuitOpenError`, `attemptTimeoutError`, `rateLimitError`, `concurrencyError`,
+`retryWaitError`).
 
 gobreaker cambia de estado de forma perezosa: el gauge pasa de abierto a semiabierto cuando llega
 la siguiente petición tras `OpenTimeout`, no en el instante en que vence. Un host sin tráfico se

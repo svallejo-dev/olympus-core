@@ -123,7 +123,7 @@ func (t *breakerTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		closeRequestBody(req)
 		t.tel.rejections.Add(ctx, 1, metric.WithAttributes(hb.attrs...))
-		return nil, fmt.Errorf("%w for %s", ErrCircuitOpen, hb.cb.Name())
+		return nil, circuitOpenError{wrapped{fmt.Errorf("%w for %s", ErrCircuitOpen, hb.cb.Name())}}
 	}
 	resp, err := t.next.RoundTrip(req)
 	done(t.outcome(ctx, resp, err))

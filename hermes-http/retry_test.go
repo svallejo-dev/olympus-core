@@ -99,6 +99,81 @@ func TestRetryNonIdempotentRequests(t *testing.T) {
 	})
 }
 
+func TestIdempotencyRules(t *testing.T) {
+	fast := hermes.RetryPolicy{InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}
+	withPolicy := func(change func(*hermes.RetryPolicy)) hermes.RetryPolicy {
+		p := fast
+		change(&p)
+		return p
+	}
+	byPath := withPolicy(func(p *hermes.RetryPolicy) {
+		p.IsIdempotent = func(r *http.Request) bool { return r.URL.Path == "/payments" }
+	})
+	customHeader := withPolicy(func(p *hermes.RetryPolicy) { p.IdempotencyHeader = "X-Request-Id" })
+
+	tests := []struct {
+		name   string
+		policy hermes.RetryPolicy
+		path   string
+		opts   []hermes.RequestOption
+		want   int32
+	}{
+		{"no rule", fast, "/payments", nil, 1},
+		{"custom header present", customHeader, "/payments", []hermes.RequestOption{hermes.Header("x-request-id", "k")}, 2},
+		{"custom header missing", customHeader, "/payments", nil, 1},
+		{"custom header replaces the default", customHeader, "/payments", []hermes.RequestOption{hermes.IdempotencyKey("k")}, 1},
+		{"default header", fast, "/payments", []hermes.RequestOption{hermes.IdempotencyKey("k")}, 2},
+		{"this call is idempotent", fast, "/payments", []hermes.RequestOption{hermes.Idempotent()}, 2},
+		{"rule matches", byPath, "/payments", nil, 2},
+		{"rule does not match", byPath, "/orders", nil, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, hits := statusSequence(503, 200)
+			c := newClient(t, newServer(t, h).URL, hermes.WithRetry(tt.policy))
+			_, _ = hermes.PostJSON[map[string]any](t.Context(), c, tt.path, map[string]string{"key": "k-1"}, tt.opts...)
+			if hits.Load() != tt.want {
+				t.Errorf("attempts = %d, want %d", hits.Load(), tt.want)
+			}
+		})
+	}
+}
+
+func TestIsIdempotentAppliesToHTTPClient(t *testing.T) {
+	h, hits := statusSequence(503, 200)
+	srv := newServer(t, h)
+	c := newClient(t, srv.URL, hermes.WithRetry(hermes.RetryPolicy{
+		InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+		IsIdempotent: func(r *http.Request) bool { return r.URL.Query().Has("requestId") },
+	}))
+
+	resp, err := c.HTTPClient().Post(srv.URL+"/payments?requestId=k-1", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if hits.Load() != 2 || resp.StatusCode != http.StatusOK {
+		t.Errorf("attempts = %d, status = %d; want 2 attempts ending in 200", hits.Load(), resp.StatusCode)
+	}
+}
+
+func TestIdempotentMarksOnlyItsRequest(t *testing.T) {
+	h, hits := statusSequence(503, 503, 503, 503)
+	c := newClient(t, newServer(t, h).URL, hermes.WithRetry(hermes.RetryPolicy{
+		MaxAttempts: 2, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+	}))
+	ctx := t.Context()
+
+	_, _ = hermes.PostJSON[map[string]any](ctx, c, "/", map[string]string{}, hermes.Idempotent())
+	if hits.Load() != 2 {
+		t.Fatalf("marked request: attempts = %d, want 2", hits.Load())
+	}
+	_, _ = hermes.PostJSON[map[string]any](ctx, c, "/", map[string]string{})
+	if hits.Load() != 3 {
+		t.Errorf("next request: attempts = %d, want 1", hits.Load()-2)
+	}
+}
+
 func TestNoRetryWithoutReplayableBody(t *testing.T) {
 	h, hits := statusSequence(503, 200)
 	c := newClient(t, newServer(t, h).URL)

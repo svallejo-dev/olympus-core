@@ -22,9 +22,22 @@ func Header(key, value string) RequestOption {
 	return func(r *http.Request) { r.Header.Set(key, value) }
 }
 
-// IdempotencyKey sets the Idempotency-Key header, which makes a POST or PATCH eligible for retries.
+// IdempotencyKey sets the Idempotency-Key header, which makes a POST or PATCH retryable unless RetryPolicy.IdempotencyHeader names another.
 func IdempotencyKey(key string) RequestOption {
-	return Header("Idempotency-Key", key)
+	return Header(defaultIdempotencyHeader, key)
+}
+
+type idempotentKey struct{}
+
+// Idempotent marks this request as safe to retry, for an API that deduplicates by a key in the body, the query or nothing at all.
+func Idempotent() RequestOption {
+	return func(r *http.Request) {
+		*r = *r.WithContext(context.WithValue(r.Context(), idempotentKey{}, true))
+	}
+}
+
+func markedIdempotent(ctx context.Context) bool {
+	return ctx.Value(idempotentKey{}) != nil
 }
 
 // Query adds values to the request URL query, keeping the parameters already there.

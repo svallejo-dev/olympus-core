@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,5 +122,41 @@ func TestTraceContextIsInjectedOncePerCall(t *testing.T) {
 	}
 	if retryEvents != 1 {
 		t.Errorf("retry span events = %d, want 1", retryEvents)
+	}
+}
+
+func TestErrorTypeNamesTheFailure(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	srv := newServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+	c := newClient(t, srv.URL, hermes.WithMeterProvider(mp), hermes.WithoutRetry(),
+		hermes.WithCircuitBreaker(hermes.BreakerPolicy{ConsecutiveFailures: 1}))
+
+	_, _ = hermes.GetJSON[struct{}](t.Context(), c, "/")
+	if _, err := hermes.GetJSON[struct{}](t.Context(), c, "/"); !errors.Is(err, hermes.ErrCircuitOpen) {
+		t.Fatalf("err = %v, want ErrCircuitOpen", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if m.Name != "http.client.request.duration" || !ok {
+				continue
+			}
+			for _, dp := range hist.DataPoints {
+				if v, ok := dp.Attributes.Value("error.type"); ok {
+					got = append(got, v.AsString())
+				}
+			}
+		}
+	}
+	const want = "github.com/svallejo-dev/olympus-core/hermes-http.circuitOpenError"
+	if !slices.Contains(got, want) {
+		t.Errorf("error.type values = %q, want %q among them", got, want)
 	}
 }

@@ -28,7 +28,7 @@ func (t *attemptTimeoutTransport) RoundTrip(req *http.Request) (*http.Response, 
 			_ = resp.Body.Close()
 		}
 		cancel(nil)
-		return nil, fmt.Errorf("%w after %v", errAttemptTimeout, t.timeout)
+		return nil, attemptTimeoutError{wrapped{fmt.Errorf("%w after %v", errAttemptTimeout, t.timeout)}}
 	}
 	if err != nil {
 		cancel(nil)

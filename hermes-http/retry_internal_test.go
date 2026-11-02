@@ -45,7 +45,8 @@ func TestBackoffStaysWithinExponentialCeiling(t *testing.T) {
 	}
 }
 
-func TestIdempotent(t *testing.T) {
+func TestPolicyAllows(t *testing.T) {
+	p := RetryPolicy{}.withDefaults()
 	for method, want := range map[string]bool{
 		http.MethodGet: true, http.MethodHead: true, http.MethodOptions: true, http.MethodPut: true,
 		http.MethodDelete: true, http.MethodTrace: true, http.MethodPost: false, http.MethodPatch: false,
@@ -54,12 +55,12 @@ func TestIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := idempotent(req); got != want {
-			t.Errorf("idempotent(%s) = %v, want %v", method, got, want)
+		if got := p.allows(req); got != want {
+			t.Errorf("allows(%s) = %v, want %v", method, got, want)
 		}
 		req.Header.Set("Idempotency-Key", "k")
-		if !idempotent(req) {
-			t.Errorf("idempotent(%s with Idempotency-Key) = false, want true", method)
+		if !p.allows(req) {
+			t.Errorf("allows(%s with Idempotency-Key) = false, want true", method)
 		}
 	}
 }
