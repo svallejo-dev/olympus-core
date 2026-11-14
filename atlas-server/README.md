@@ -20,14 +20,6 @@ propios, y se prueban con `httptest`.
 go get github.com/svallejo-dev/olympus-core/atlas-server@latest
 ```
 
-El repositorio es privado. Indica a Go que no use el proxy público y da acceso a git por SSH o
-con un token:
-
-```sh
-go env -w GOPRIVATE='github.com/svallejo-dev/*'
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-```
-
 ## Inicio rápido
 
 ```go

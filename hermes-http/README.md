@@ -12,16 +12,6 @@ Es un SDK independiente del monorepo `olympus-core`: no importa `atlas` ni ning�
 go get github.com/svallejo-dev/olympus-core/hermes-http@latest
 ```
 
-El repositorio es privado, así que Go necesita saltarse el proxy público y tener acceso por git:
-
-```sh
-go env -w GOPRIVATE='github.com/svallejo-dev/*'
-# SSH:
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-# o bien un token por HTTPS:
-git config --global url."https://<usuario>:<token>@github.com/".insteadOf "https://github.com/"
-```
-
 ## Uso rápido
 
 ```go

@@ -28,12 +28,11 @@ código, el paquete sigue siendo `atlas` o `hermes`, porque Go no admite guiones
 - **Sin acoplamiento.** Handlers y middlewares son funciones de `net/http`, sin tipos de contexto
   propios; atlas también sirve cualquier `http.Handler` y hermes expone un `*http.Client` estándar.
 
-## Instalación (repo privado)
+## Instalación
 
 ```sh
-go env -w GOPRIVATE=github.com/svallejo-dev/*
-git config --global url."git@github.com:".insteadOf "https://github.com/"   # o un token HTTPS
 go get github.com/svallejo-dev/olympus-core/atlas-server@latest
+go get github.com/svallejo-dev/olympus-core/hermes-http@latest
 ```
 
 ## Versiones
@@ -60,3 +59,7 @@ go run ./examples/orders-api                   # atlas + hermes juntos
 
 `examples/` es un módulo aparte que usa los dos SDKs desde el código local (`replace`); no se
 publica.
+
+## Licencia
+
+[MIT](LICENSE)
